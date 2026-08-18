@@ -1,0 +1,6 @@
+# Sample Job Targets for JobFinder Pro
+# Add company websites, career pages, or direct job postings below:
+https://jobs.lever.co/postscript
+https://jobs.lever.co/vercel
+https://boards.greenhouse.io/automattic
+https://boards.greenhouse.io/remotecom

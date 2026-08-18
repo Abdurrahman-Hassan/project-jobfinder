@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>{{name}} - Resume</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 14mm 14mm 14mm 14mm;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      color: #1a1a1a;
+      line-height: 1.38;
+      font-size: 9.8pt;
+      background: #ffffff;
+    }
+    .header {
+      text-align: left;
+      border-bottom: 1.5px solid #2d3748;
+      padding-bottom: 8px;
+      margin-bottom: 10px;
+    }
+    .name {
+      font-size: 20pt;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: #0f172a;
+      text-transform: uppercase;
+    }
+    .contact-info {
+      font-size: 8.8pt;
+      color: #475569;
+      margin-top: 4px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .contact-info a {
+      color: #0369a1;
+      text-decoration: none;
+    }
+    .section-title {
+      font-size: 11pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #0f172a;
+      border-bottom: 1px solid #cbd5e1;
+      padding-bottom: 2px;
+      margin-top: 10px;
+      margin-bottom: 6px;
+    }
+    .summary-text {
+      font-size: 9.2pt;
+      color: #334155;
+      text-align: justify;
+      margin-bottom: 6px;
+    }
+    .skills-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 3px 10px;
+      font-size: 9pt;
+      margin-bottom: 6px;
+    }
+    .skill-cat {
+      font-weight: 700;
+      color: #1e293b;
+    }
+    .skill-items {
+      color: #334155;
+    }
+    .job-entry {
+      margin-bottom: 7px;
+    }
+    .job-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+    .job-role {
+      font-weight: 700;
+      font-size: 9.8pt;
+      color: #0f172a;
+    }
+    .job-company {
+      font-weight: 600;
+      color: #0369a1;
+    }
+    .job-period {
+      font-size: 8.8pt;
+      font-style: italic;
+      color: #64748b;
+    }
+    .job-location {
+      font-size: 8.5pt;
+      color: #64748b;
+    }
+    ul {
+      margin-left: 15px;
+      margin-top: 2px;
+    }
+    li {
+      font-size: 8.9pt;
+      color: #334155;
+      margin-bottom: 2px;
+      line-height: 1.32;
+    }
+    .project-entry {
+      margin-bottom: 5px;
+    }
+    .project-title {
+      font-weight: 700;
+      color: #0f172a;
+      font-size: 9.2pt;
+    }
+    .project-desc {
+      font-size: 8.8pt;
+      color: #334155;
+    }
+    .cert-list {
+      font-size: 8.8pt;
+      color: #334155;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="name">{{name}}</div>
+    <div class="contact-info">
+      <span>{{location}}</span> |
+      <span>{{phone}}</span> |
+      <span>{{email}}</span> |
+      <span><a href="{{linkedin}}">LinkedIn</a></span> |
+      <span><a href="{{github}}">GitHub</a></span> |
+      <span><a href="{{portfolio}}">Portfolio</a></span>
+    </div>
+  </div>
+
+  <div class="section-title">Professional Summary</div>
+  <div class="summary-text">{{summary}}</div>
+
+  <div class="section-title">Technical Skills</div>
+  <div class="skills-grid">
+    {{#skills}}
+    <div class="skill-cat">• {{category}}:</div>
+    <div class="skill-items">{{items}}</div>
+    {{/skills}}
+  </div>
+
+  <div class="section-title">Professional Experience</div>
+  {{#experiences}}
+  <div class="job-entry">
+    <div class="job-header">
+      <div><span class="job-role">{{role}}</span> — <span class="job-company">{{company}}</span> ({{location}})</div>
+      <div class="job-period">{{period}}</div>
+    </div>
+    <ul>
+      {{#bullets}}
+      <li>{{.}}</li>
+      {{/bullets}}
+    </ul>
+  </div>
+  {{/experiences}}
+
+  <div class="section-title">Key Projects</div>
+  {{#projects}}
+  <div class="project-entry">
+    <span class="project-title">{{name}}</span> (<em>{{technologies}}</em>):
+    <span class="project-desc">{{description}}</span>
+  </div>
+  {{/projects}}
+
+  <div class="section-title">Education & Certifications</div>
+  <div style="font-size: 9pt; margin-bottom: 4px;">
+    <strong>Bachelor of Science in Software Engineering</strong> — Virtual University of Pakistan
+  </div>
+  <div class="cert-list">
+    <span>• Google Cybersecurity Professional</span>
+    <span>• freeCodeCamp Backend APIs</span>
+    <span>• Cisco CyberOps</span>
+    <span>• Google IT Support & Python</span>
+  </div>
+
+</body>
+</html>
