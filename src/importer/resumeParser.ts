@@ -1,16 +1,28 @@
-import fs from 'fs/promises';
+import fs from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
+import { PDFParse } from 'pdf-parse';
 import { CandidateProfile } from '../types/index.js';
 import { DEFAULT_PROFILE } from '../config/profile.js';
-import { CandidateProfileSchema, LLMOutputSchema } from '../validation/schemas.js';
+import { CandidateProfileSchema } from '../validation/schemas.js';
 
 export async function parseResumeFileToProfile(filePath: string): Promise<CandidateProfile> {
   const resolvedPath = path.resolve(process.cwd(), filePath);
   const ext = path.extname(resolvedPath).toLowerCase();
 
-  const fileContent = await fs.readFile(resolvedPath, 'utf-8');
+  let fileContent = '';
+
+  if (ext === '.pdf') {
+    const dataBuffer = await fsp.readFile(resolvedPath);
+    const parser = new PDFParse({ data: dataBuffer });
+    const parsedPdf = await parser.getText();
+    fileContent = parsedPdf.text || '';
+  } else {
+    fileContent = await fsp.readFile(resolvedPath, 'utf-8');
+  }
+
   if (!fileContent.trim()) {
     throw new Error(`The provided resume file at ${resolvedPath} is empty.`);
   }
@@ -30,43 +42,91 @@ export async function parseResumeFileToProfile(filePath: string): Promise<Candid
     }
   }
 
-  // 2. Text / Markdown / LLM-Assisted Parsing
+  // 2. Fast LLM Extraction with Strict 4s Timeout
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (apiKey && apiKey.length > 10) {
-    console.log(chalk.cyan('🧠 Parsing resume structured data using OpenRouter AI...'));
     try {
       const llmProfile = await parseProfileWithLLM(fileContent, apiKey);
       if (llmProfile) {
         await saveProfileJson(llmProfile);
         return llmProfile;
       }
-    } catch (err: any) {
-      console.warn(chalk.yellow(`OpenRouter CV parsing failed (${err.message}). Using rule-based extractor.`));
+    } catch {
+      // fallback to fast rule-based extractor
     }
   }
 
-  // 3. Deterministic / Rule-Based Parsing Fallback
-  console.log(chalk.cyan('⚙️ Parsing resume using deterministic rule-based extractor...'));
+  // 3. Instant Deterministic / Rule-Based Parsing Fallback
   const ruleProfile = parseProfileRuleBased(fileContent);
   await saveProfileJson(ruleProfile);
   return ruleProfile;
 }
 
-async function saveProfileJson(profile: CandidateProfile): Promise<void> {
+export async function saveProfileJson(profile: CandidateProfile): Promise<void> {
   const configDir = path.resolve(process.cwd(), 'src', 'config');
-  await fs.mkdir(configDir, { recursive: true });
+  await fsp.mkdir(configDir, { recursive: true });
   const profileJsonPath = path.join(configDir, 'profile.json');
-  await fs.writeFile(profileJsonPath, JSON.stringify(profile, null, 2), 'utf-8');
-  console.log(chalk.green(`✓ Active candidate profile saved to ${profileJsonPath}`));
+  await fsp.writeFile(profileJsonPath, JSON.stringify(profile, null, 2), 'utf-8');
+}
+
+/**
+ * Automatically inspects the "resumes/" folder.
+ * If a PDF, JSON, TXT, or MD resume exists, loads and updates profile.json automatically.
+ */
+export async function autoLoadResumeFromFolder(): Promise<CandidateProfile | null> {
+  const resumesDir = path.resolve(process.cwd(), 'resumes');
+  if (!fs.existsSync(resumesDir)) {
+    fs.mkdirSync(resumesDir, { recursive: true });
+    return null;
+  }
+
+  const files = fs.readdirSync(resumesDir).filter((f) => {
+    if (f.toLowerCase().startsWith('readme')) return false;
+    const ext = path.extname(f).toLowerCase();
+    return ['.pdf', '.json', '.txt', '.md'].includes(ext);
+  });
+
+  if (files.length === 0) {
+    return null;
+  }
+
+  // Pick the newest or primary file in resumes/
+  const primaryFile = files[0];
+  const fullPath = path.join(resumesDir, primaryFile);
+  const stats = fs.statSync(fullPath);
+
+  // Check if profile.json already exists and is newer than the resume file
+  const profileJsonPath = path.resolve(process.cwd(), 'src', 'config', 'profile.json');
+  if (fs.existsSync(profileJsonPath)) {
+    const profileStats = fs.statSync(profileJsonPath);
+    if (profileStats.mtimeMs >= stats.mtimeMs) {
+      try {
+        const cached = JSON.parse(fs.readFileSync(profileJsonPath, 'utf-8'));
+        return cached;
+      } catch {
+        // re-parse if corrupted
+      }
+    }
+  }
+
+  console.log(chalk.bold.magenta(`\n📄 Auto-detected base resume in "resumes/": ${primaryFile}`));
+  try {
+    const loadedProfile = await parseResumeFileToProfile(fullPath);
+    console.log(chalk.green(`✓ Profile for "${loadedProfile.name}" loaded and cached!`));
+    return loadedProfile;
+  } catch (err: any) {
+    console.warn(chalk.yellow(`[Resume Auto-Load Warning] ${err.message}`));
+    return null;
+  }
 }
 
 async function parseProfileWithLLM(
   resumeText: string,
   apiKey: string
 ): Promise<CandidateProfile | null> {
-  const model = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.2-3b-instruct:free';
+  const model = 'meta-llama/llama-3.2-3b-instruct:free';
 
-  const systemPrompt = `You are an expert HR data parsing system. Extract structured JSON matching the candidate profile schema from the resume text.
+  const systemPrompt = `You are an expert HR parser. Extract JSON matching candidate profile schema from resume.
 Schema structure:
 {
   "name": "Full Name",
@@ -116,7 +176,7 @@ Respond with raw JSON only.`;
       model,
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Resume Content:\n${resumeText.slice(0, 8000)}` }
+        { role: 'user', content: `Resume Content:\n${resumeText.slice(0, 3000)}` }
       ],
       temperature: 0.1
     },
@@ -125,7 +185,7 @@ Respond with raw JSON only.`;
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      timeout: 30000,
+      timeout: 4000,
       maxContentLength: 5 * 1024 * 1024,
       maxBodyLength: 5 * 1024 * 1024
     }
@@ -144,10 +204,8 @@ Respond with raw JSON only.`;
     const validated = CandidateProfileSchema.safeParse(parsed);
     if (validated.success) {
       return validated.data;
-    } else {
-      console.warn('[Importer] LLM output missing required profile fields, falling back.');
-      return null;
     }
+    return null;
   } catch {
     return null;
   }

@@ -4,7 +4,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import dotenv from 'dotenv';
 import readline from 'readline';
-import { parseResumeFileToProfile } from './importer/resumeParser.js';
+import { parseResumeFileToProfile, autoLoadResumeFromFolder } from './importer/resumeParser.js';
 import { processJobTarget, processDirectJD } from './pipeline.js';
 import { searchStartupsAndJobs, SEARCH_PRESETS } from './discovery/searchEngine.js';
 import { getStoredLeads, saveLead, getTodaySentCount } from './tracker/db.js';
@@ -16,7 +16,10 @@ const program = new Command();
 program
   .name('jobfinder')
   .description('Autonomous AI Job Hunter & Resume Tailoring Engine')
-  .version('1.0.0');
+  .version('1.0.0')
+  .hook('preAction', async () => {
+    await autoLoadResumeFromFolder().catch(() => {});
+  });
 
 // 1. Import CV Command
 program
@@ -42,6 +45,74 @@ program
       await processJobTarget(url);
     } catch (err: any) {
       console.error(chalk.red(`Pipeline error: ${err.message}`));
+    }
+  });
+
+// 2b. Pitch Directly to a Startup Website (Speculative Intro & Reverse Pitch)
+program
+  .command('pitch <startupUrl>')
+  .description('Reverse-pitch directly to a startup homepage (scrapes product, matches resume strengths, drafts founder pitch)')
+  .action(async (startupUrl: string) => {
+    try {
+      const { processStartupPitch } = await import('./pipeline.js');
+      await processStartupPitch(startupUrl);
+    } catch (err: any) {
+      console.error(chalk.red(`Startup pitch error: ${err.message}`));
+    }
+  });
+
+// 2c. Deep-Crawl a Specific Company Website
+program
+  .command('crawl <companyUrl>')
+  .description('Deep-crawl a company website: inspect career & contact pages, match roles or draft speculative pitch')
+  .action(async (companyUrl: string) => {
+    try {
+      const { processCompanyOpportunity } = await import('./pipeline.js');
+      await processCompanyOpportunity(companyUrl);
+    } catch (err: any) {
+      console.error(chalk.red(`Crawl error: ${err.message}`));
+    }
+  });
+
+// 2d. Autonomous Company & Software House Discovery & Deep-Crawl
+program
+  .command('company-hunt <query>')
+  .description('Discover software houses / startups matching a query, deep-crawl their pages, and apply (custom or speculative)')
+  .option('-l, --limit <number>', 'Number of companies to find', '5')
+  .option('-r, --region <region>', 'Target region', '')
+  .action(async (query: string, options) => {
+    try {
+      const { searchCompanyWebsites } = await import('./discovery/searchEngine.js');
+      const { processCompanyOpportunity } = await import('./pipeline.js');
+
+      const limit = Math.min(30, Math.max(1, parseInt(options.limit, 10) || 5));
+      const region = options.region || '';
+
+      console.log(chalk.bold.magenta(`\n🏢 Searching software houses & company websites for: "${query}" [Limit: ${limit}]...`));
+      const targets = await searchCompanyWebsites(query, limit, region);
+
+      if (targets.length === 0) {
+        console.log(chalk.yellow('No matching company websites found.'));
+        return;
+      }
+
+      console.log(chalk.green(`\nFound ${targets.length} target company website(s):`));
+      targets.forEach((t, i) => console.log(`  ${i + 1}. ${chalk.bold(t.title)} (${chalk.blue(t.url)})`));
+
+      console.log(chalk.bold.green(`\n🚀 Deep-crawling companies and tailoring applications...`));
+      let processed = 0;
+      for (const t of targets) {
+        try {
+          const lead = await processCompanyOpportunity(t.url);
+          if (lead) processed++;
+        } catch (err: any) {
+          console.error(chalk.red(`Failed processing ${t.url}: ${err.message}`));
+        }
+      }
+
+      console.log(chalk.bold.cyan(`\n✨ Company hunt complete: ${processed} applications drafted to output/resumes/ and output/drafts/`));
+    } catch (err: any) {
+      console.error(chalk.red(`Company hunt error: ${err.message}`));
     }
   });
 
@@ -79,8 +150,8 @@ program
   .description('Search startups, career pages, and ATS boards matching query')
   .option('-l, --limit <number>', 'Number of targets to find', '5')
   .option('-r, --region <region>', 'Target region or location (e.g. Worldwide, US, Europe, Pakistan, Remote)', 'Worldwide')
-  .option('-e, --engine <engine>', 'Search engine to use (bing, google, all)', 'bing')
-  .option('-b, --browser <browser>', 'Browser to use (chrome, edge, brave, chromium)')
+  .option('-e, --engine <engine>', 'Search engine to use (bing, ddg, google, all)', 'bing')
+  .option('-b, --browser <browser>', 'Browser to use (chrome, edge, brave, camoufox, chromium)')
   .option('--no-auto-process', 'Only search and list results without processing applications')
   .action(async (query: string, options) => {
     try {
@@ -132,11 +203,11 @@ program
 // 5. Curated Auto Hunt
 program
   .command('auto-hunt [preset]')
-  .description('Run curated autonomous hunt. Presets: fullstack-ai, nextjs-architect, mcp-agentic')
+  .description('Run curated autonomous hunt. Presets: fullstack-ai, nextjs-architect, mcp-agentic, pakistan-tech')
   .option('-l, --limit <number>', 'Targets per query', '3')
-  .option('-r, --region <region>', 'Target region (e.g. Worldwide, US, Europe, Remote)', 'Worldwide')
-  .option('-e, --engine <engine>', 'Search engine to use (bing, google, all)', 'bing')
-  .option('-b, --browser <browser>', 'Browser to use (chrome, edge, brave, chromium)')
+  .option('-r, --region <region>', 'Target region (e.g. Worldwide, US, Europe, Remote, Pakistan)', 'Worldwide')
+  .option('-e, --engine <engine>', 'Search engine to use (bing, ddg, google, all)', 'bing')
+  .option('-b, --browser <browser>', 'Browser to use (chrome, edge, brave, camoufox, chromium)')
   .action(async (preset: string = 'fullstack-ai', options) => {
     if (options.browser) {
       process.env.BROWSER_TYPE = options.browser;

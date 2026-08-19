@@ -41,6 +41,15 @@ const IGNORED_DOMAINS = [
   'reddit.com',
   'medium.com',
   'quora.com',
+  'onlyfrontendjobs.com',
+  'remoterocketship.com',
+  'jaabz.com',
+  'builtin.com',
+  'f6s.com',
+  'clutch.co',
+  'goodfirms.co',
+  'g2.com',
+  'techbehemoths.com',
   'dictionary.cambridge.org',
   'merriam-webster.com',
   'collinsdictionary.com',
@@ -566,7 +575,82 @@ export async function searchBingLive(
   return results;
 }
 
-// 3. Remote Tech Job Feed APIs (Remotive, Arbeitnow with location filtering)
+// 3. DuckDuckGo Live Web Search (Stealth Headless with Region & strict job validation)
+export async function searchDuckDuckGoLive(
+  query: string,
+  limit: number = 10,
+  region?: string
+): Promise<SearchResultTarget[]> {
+  const results: SearchResultTarget[] = [];
+  const seenUrls = new Set<string>();
+  const cleanKeyword = query.replace(/["']/g, '').trim();
+  const regionTag = region && region.toLowerCase() !== 'any' ? region : 'remote';
+
+  let browser;
+  try {
+    browser = await launchManagedBrowser();
+    const page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.setUserAgent(getRandomUserAgent());
+
+    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(
+      `${cleanKeyword} ${regionTag} jobs`
+    )}&ia=web`;
+    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+
+    const raw = await page.evaluate(() => {
+      const items: any[] = [];
+      document.querySelectorAll('article, li[data-layout="organic"]').forEach((el) => {
+        const a = el.querySelector('h2 a, a[data-testid="result-title-a"]') as HTMLAnchorElement;
+        const snippet = el.querySelector('[data-result="snippet"]') as HTMLElement;
+        if (a && a.href && !a.href.includes('duckduckgo.com')) {
+          items.push({
+            title: a.innerText.trim(),
+            url: a.href,
+            snippet: snippet ? snippet.innerText.trim() : ''
+          });
+        }
+      });
+      return items;
+    });
+
+    for (const r of raw) {
+      if (results.length >= limit) break;
+      if (r.url.startsWith('http') && !r.url.includes('duckduckgo.com')) {
+        try {
+          const domain = new URL(r.url).hostname.replace(/^www\./, '');
+          if (
+            !IGNORED_DOMAINS.some((d) => domain.includes(d)) &&
+            !seenUrls.has(r.url) &&
+            isLegitimateJobResult(r.title, r.snippet, r.url)
+          ) {
+            seenUrls.add(r.url);
+            results.push({
+              title: r.title,
+              url: r.url,
+              snippet: r.snippet,
+              domain,
+              location: region || 'Remote',
+              source: 'DuckDuckGo Search'
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[DDG Search Warning] DuckDuckGo search warning: ${err.message}`);
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+
+  return results;
+}
+
+// 4. Remote Tech Job Feed APIs (Remotive, Arbeitnow with location filtering)
 export async function searchRemoteFeeds(
   query: string,
   limit: number = 5,
@@ -673,7 +757,7 @@ export async function searchRemoteFeeds(
   return results;
 }
 
-// 4. Hacker News "Who is Hiring" Algolia API
+// 5. Hacker News "Who is Hiring" Algolia API
 export async function searchHNHiringStartups(
   keyword: string,
   limit: number = 5,
@@ -765,7 +849,7 @@ export async function searchHNHiringStartups(
   return results;
 }
 
-// 5. Combined Multi-Engine Search with Region & Engine Selection
+// 6. Combined Multi-Engine Search with Region & Engine Selection
 export async function searchStartupsAndJobs(
   query: string,
   limit: number = 10,
@@ -776,7 +860,7 @@ export async function searchStartupsAndJobs(
   const seenUrls = new Set<string>();
   const engine = (engineChoice || process.env.DEFAULT_SEARCH_ENGINE || 'bing').toLowerCase();
 
-  // Mode 1: Bing Search Primary
+  // Mode 1: Bing Live Search
   if (engine === 'bing' || engine === 'all') {
     console.log(
       chalk.gray(
@@ -792,7 +876,24 @@ export async function searchStartupsAndJobs(
     }
   }
 
-  // Mode 2: Remote Job APIs (Remotive + Arbeitnow)
+  // Mode 2: DuckDuckGo Live Search (when Bing needs more or when ddg selected)
+  if ((engine === 'ddg' || engine === 'duckduckgo' || engine === 'all' || (engine === 'bing' && combined.length < limit)) && combined.length < limit) {
+    const remaining = limit - combined.length;
+    console.log(
+      chalk.gray(
+        `  • Querying DuckDuckGo Stealth Search (${remaining} needed)...`
+      )
+    );
+    const ddgResults = await searchDuckDuckGoLive(query, remaining, region);
+    for (const r of ddgResults) {
+      if (!seenUrls.has(r.url)) {
+        seenUrls.add(r.url);
+        combined.push(r);
+      }
+    }
+  }
+
+  // Mode 3: Remote Job APIs (Remotive + Arbeitnow)
   if (combined.length < limit) {
     const remaining = limit - combined.length;
     const remoteResults = await searchRemoteFeeds(query, remaining, region);
@@ -836,9 +937,114 @@ export async function searchStartupsAndJobs(
   return combined.slice(0, limit);
 }
 
+// 7. Universal AI-Orchestrated Dynamic Company Discovery
+export async function searchCompanyWebsites(
+  query: string,
+  limit: number = 10,
+  region?: string
+): Promise<SearchResultTarget[]> {
+  const { optimizeSearchQueryWithLLM, filterAndSelectCompaniesWithLLM } = await import(
+    '../ai/llmSearchOrchestrator.js'
+  );
+  const { getActiveProfile } = await import('../config/profile.js');
+  const profile = getActiveProfile();
+
+  // 1. Stage 1: AI Query Optimization (Generates 3 precision dorks)
+  const searchQueries = await optimizeSearchQueryWithLLM(query, region);
+
+  const rawCandidatePool: { title: string; url: string; snippet: string }[] = [];
+  const seenRawUrls = new Set<string>();
+
+  let browser;
+  try {
+    browser = await launchManagedBrowser();
+    const page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.setUserAgent(getRandomUserAgent());
+
+    for (const q of searchQueries) {
+      if (rawCandidatePool.length >= limit * 3) break;
+
+      console.log(chalk.gray(`  • Querying engine: "${q.slice(0, 70)}..."`));
+      const ddgUrl = `https://duckduckgo.com/?q=${encodeURIComponent(q)}&ia=web`;
+      await page.goto(ddgUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+
+      const rawResults = await page.evaluate(() => {
+        const items: { title: string; url: string; snippet: string }[] = [];
+        document.querySelectorAll('article, li[data-layout="organic"]').forEach((el) => {
+          const a = el.querySelector('h2 a, a[data-testid="result-title-a"]') as HTMLAnchorElement;
+          const snippet = el.querySelector('[data-result="snippet"]') as HTMLElement;
+          if (a && a.href && !a.href.includes('duckduckgo.com')) {
+            items.push({
+              title: a.innerText.trim(),
+              url: a.href,
+              snippet: snippet ? snippet.innerText.trim() : ''
+            });
+          }
+        });
+        return items;
+      });
+
+      for (const r of rawResults) {
+        if (!seenRawUrls.has(r.url)) {
+          seenRawUrls.add(r.url);
+          rawCandidatePool.push(r);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Company Search Warning] ${err.message}`);
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+
+  // 2. Stage 2: AI Target Vetting (Filters out job agencies, aggregators, & blogs)
+  const vettedCompanies = await filterAndSelectCompaniesWithLLM(rawCandidatePool, profile);
+
+  const results: SearchResultTarget[] = [];
+  for (const v of vettedCompanies) {
+    if (results.length >= limit) break;
+    results.push({
+      title: v.companyName,
+      url: v.websiteUrl,
+      snippet: v.reasoning,
+      domain: v.domain,
+      location: region || 'Worldwide',
+      source: 'AI-Vetted Corporate Target'
+    });
+  }
+
+  return results.slice(0, limit);
+}
+
 export const SEARCH_PRESETS: Record<string, string[]> = {
+  // 1. Direct Startup Reverse Sourcing & Speculative Matching
+  'ai-mcp-startups': [
+    'site:lever.co "Model Context Protocol"',
+    'site:ashbyhq.com "Model Context Protocol"',
+    'site:greenhouse.io "AI Agent" "TypeScript"',
+    'site:lever.co "AI Engineer" "Full Stack"'
+  ],
+  'nextjs-saas-startups': [
+    'site:lever.co "Next.js" "Software Engineer"',
+    'site:greenhouse.io "Senior Full Stack" "Next.js"',
+    'site:ashbyhq.com "Next.js" "TypeScript"'
+  ],
+  'hospitality-foodtech': [
+    'site:lever.co "hospitality" "Full Stack"',
+    'site:greenhouse.io "catering" "Engineer"',
+    'site:ashbyhq.com "restaurant" "Software Engineer"'
+  ],
+  'pakistan-startups': [
+    'site:lever.co "Pakistan" "Full Stack"',
+    'site:greenhouse.io "Pakistan" "Software Engineer"',
+    'site:ashbyhq.com "Pakistan" "Engineer"'
+  ],
+  // 2. Curated Open Roles
   'fullstack-ai': [
-    'site:lever.co "Full Stack" OR "AI Engineer" remote',
+    'site:lever.co "Full Stack" "AI Engineer" remote',
     'site:greenhouse.io "Full Stack Engineer" "TypeScript" remote',
     'site:ashbyhq.com "Full Stack Engineer" "Next.js" remote'
   ],
@@ -848,13 +1054,13 @@ export const SEARCH_PRESETS: Record<string, string[]> = {
     'site:ashbyhq.com "Senior Full Stack" "Next.js" remote'
   ],
   'mcp-agentic': [
-    'site:lever.co "AI Engineer" OR "Model Context Protocol" remote',
-    'site:greenhouse.io "AI Agent" "Full Stack" remote',
-    'site:ashbyhq.com "Founding Engineer" "AI" remote'
+    'site:lever.co "Model Context Protocol"',
+    'site:greenhouse.io "AI Agent" "Full Stack"',
+    'site:ashbyhq.com "Founding Engineer" "AI"'
   ],
   'pakistan-tech': [
-    'site:lever.co "Pakistan" "Full Stack" OR "Next.js"',
+    'site:lever.co "Pakistan" "Full Stack"',
     'site:greenhouse.io "Pakistan" "Software Engineer"',
-    'site:ashbyhq.com "Pakistan" OR "Lahore" OR "Karachi" "Engineer"'
+    'site:ashbyhq.com "Pakistan" "Engineer"'
   ]
 };

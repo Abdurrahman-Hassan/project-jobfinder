@@ -16,7 +16,10 @@
     "bulk": "tsx src/cli.ts bulk",
     "send": "tsx src/cli.ts send-approved",
     "stats": "tsx src/cli.ts stats",
-    "browsers": "tsx src/cli.ts browsers"
+    "browsers": "tsx src/cli.ts browsers",
+    "pitch": "tsx src/cli.ts pitch",
+    "crawl": "tsx src/cli.ts crawl",
+    "company-hunt": "tsx src/cli.ts company-hunt"
   },
   "keywords": [
     "job-automation",
@@ -35,12 +38,16 @@
     "dotenv": "^16.4.7",
     "fast-xml-parser": "^4.5.3",
     "nodemailer": "^6.10.0",
+    "pdf-parse": "^2.4.5",
     "puppeteer": "^24.4.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.9",
     "@types/nodemailer": "^6.4.17",
+    "@types/pdf-parse": "^1.1.5",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }

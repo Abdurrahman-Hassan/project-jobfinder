@@ -1,6 +1,12 @@
 import fs from 'fs/promises';
 import path from 'path';
-import puppeteer, { Browser } from 'puppeteer';
+import { addExtra } from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import vanillaPuppeteer, { Browser } from 'puppeteer';
+
+// Register global stealth evasions on all browser instances
+const puppeteer = addExtra(vanillaPuppeteer as any);
+puppeteer.use(StealthPlugin());
 
 const activeBrowsers = new Set<Browser>();
 
@@ -45,11 +51,32 @@ setupCleanupHooks();
 // Browser Executable Detection Matrix (Windows, macOS, Linux)
 export interface BrowserCandidate {
   name: string;
-  type: 'chrome' | 'edge' | 'brave' | 'chromium' | 'vivaldi';
+  type: 'chrome' | 'edge' | 'brave' | 'camoufox' | 'chromium' | 'vivaldi';
   paths: string[];
 }
 
 const BROWSER_DEFINITIONS: BrowserCandidate[] = [
+  {
+    name: 'Brave Browser',
+    type: 'brave',
+    paths: [
+      'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+      'C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+      path.join(process.env.LOCALAPPDATA || '', 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
+      '/usr/bin/brave-browser',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
+    ]
+  },
+  {
+    name: 'Camoufox (Stealth Anti-Detect)',
+    type: 'camoufox',
+    paths: [
+      path.join(process.env.LOCALAPPDATA || '', 'camoufox\\camoufox.exe'),
+      path.join(process.env.USERPROFILE || '', '.cache\\camoufox\\camoufox.exe'),
+      'C:\\Program Files\\Camoufox\\camoufox.exe',
+      '/usr/bin/camoufox'
+    ]
+  },
   {
     name: 'Google Chrome',
     type: 'chrome',
@@ -72,17 +99,6 @@ const BROWSER_DEFINITIONS: BrowserCandidate[] = [
       '/usr/bin/microsoft-edge',
       '/usr/bin/microsoft-edge-stable',
       '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
-    ]
-  },
-  {
-    name: 'Brave Browser',
-    type: 'brave',
-    paths: [
-      'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
-      'C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
-      path.join(process.env.LOCALAPPDATA || '', 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
-      '/usr/bin/brave-browser',
-      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
     ]
   },
   {
@@ -117,7 +133,7 @@ export async function listAvailableBrowsers(): Promise<{ name: string; type: str
 }
 
 export async function getBrowserExecutable(preferredType?: string): Promise<string | undefined> {
-  // 1. Custom Explicit Path from .env (e.g. BROWSER_PATH=C:\path\to\browser.exe)
+  // 1. Custom Explicit Path from .env (e.g. BROWSER_PATH=C:\path\to\brave.exe)
   const customPath = process.env.BROWSER_PATH?.trim();
   if (customPath) {
     try {
@@ -128,7 +144,7 @@ export async function getBrowserExecutable(preferredType?: string): Promise<stri
     }
   }
 
-  // 2. Preferred Browser Type from option or .env (e.g. BROWSER_TYPE=edge or BROWSER_TYPE=chrome)
+  // 2. Preferred Browser Type from option or .env (e.g. BROWSER_TYPE=brave or BROWSER_TYPE=camoufox)
   const targetType = (preferredType || process.env.BROWSER_TYPE || '').toLowerCase().trim();
 
   if (targetType) {
@@ -148,7 +164,7 @@ export async function getBrowserExecutable(preferredType?: string): Promise<stri
     }
   }
 
-  // 3. Auto-Discovery Priority: Chrome -> Edge -> Brave -> Chromium
+  // 3. Auto-Discovery Priority: Brave -> Chrome -> Edge -> Chromium
   for (const b of BROWSER_DEFINITIONS) {
     for (const p of b.paths) {
       if (!p) continue;
@@ -176,7 +192,8 @@ export async function launchManagedBrowser(
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled'
+      '--disable-blink-features=AutomationControlled',
+      '--window-size=1366,768'
     ],
     ...options
   });

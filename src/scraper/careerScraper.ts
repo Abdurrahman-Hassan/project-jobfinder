@@ -253,7 +253,8 @@ export async function scrapeJobOrCareerPage(targetUrl: string): Promise<JobListi
       'jobicy',
       'smartrecruiters',
       'breezy',
-      'applytojob'
+      'applytojob',
+      'github'
     ];
 
     const ogSiteName = $('meta[property="og:site_name"]').attr('content');
@@ -261,7 +262,7 @@ export async function scrapeJobOrCareerPage(targetUrl: string): Promise<JobListi
       ogSiteName &&
       ogSiteName.length > 2 &&
       ogSiteName.length < 40 &&
-      !EXCLUDED_PORTAL_NAMES.some((p) => ogSiteName.toLowerCase().includes(p))
+      !EXCLUDED_PORTAL_NAMES.some((p: string) => ogSiteName.toLowerCase().includes(p))
     ) {
       smartCompanyName = ogSiteName.trim();
     }
@@ -278,10 +279,49 @@ export async function scrapeJobOrCareerPage(targetUrl: string): Promise<JobListi
     }
 
     // Title resolution
-    let smartTitle = jsonLdJob?.title || $('h1').first().text().trim() || $('title').text().trim();
+    const rawPageTitle = $('title').text().trim();
+    let smartTitle = jsonLdJob?.title || $('h1').first().text().trim() || rawPageTitle;
     smartTitle = smartTitle.replace(/\s+[-|]\s+.*$/, '').replace(/\(Req.*?\)/i, '').trim();
     if (smartTitle.length > 60) smartTitle = smartTitle.slice(0, 57) + '...';
     if (!smartTitle) smartTitle = 'Software Engineer';
+
+    // Aggregator & Portal Deep Extraction (Remotive, Arbeitnow, Jobicy, GitHub)
+    if (
+      domain === 'remotive.com' ||
+      domain === 'arbeitnow.com' ||
+      domain === 'jobicy.com' ||
+      domain === 'github.com' ||
+      EXCLUDED_PORTAL_NAMES.some((p: string) => smartCompanyName.toLowerCase().includes(p))
+    ) {
+      // 1. GitHub Organization extraction (e.g. github.com/prisma/mcp -> Prisma)
+      if (domain === 'github.com') {
+        const parts = parsedUrl.pathname.split('/').filter(Boolean);
+        if (parts.length >= 1 && !['careers', 'about', 'features', 'pricing'].includes(parts[0].toLowerCase())) {
+          const org = parts[0];
+          smartCompanyName = org.charAt(0).toUpperCase() + org.slice(1);
+          smartCompanyDomain = `${org.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
+        }
+      }
+
+      // 2. JSON-LD hiring organization
+      if (jsonLdJob?.hiringOrganization?.name) {
+        const orgName = jsonLdJob.hiringOrganization.name.trim();
+        if (orgName && !EXCLUDED_PORTAL_NAMES.some((p: string) => orgName.toLowerCase().includes(p))) {
+          smartCompanyName = orgName;
+          smartCompanyDomain = `${orgName.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
+        }
+      }
+
+      // 3. Title-based company pattern extraction: "Role at Company"
+      const atMatch = rawPageTitle.match(/\b(?:at|@)\s+([A-Za-z0-9 ._-]+?)(?:\s+[-|(\[]|$)/i);
+      if (atMatch && atMatch[1]) {
+        const extracted = atMatch[1].trim();
+        if (extracted.length > 1 && extracted.length < 40 && !EXCLUDED_PORTAL_NAMES.some((p: string) => extracted.toLowerCase().includes(p))) {
+          smartCompanyName = extracted;
+          smartCompanyDomain = `${extracted.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
+        }
+      }
+    }
 
     // Direct Job URL Check: If the URL is already a direct job posting (contains /j/, /jobs/, /job/, or has JobPosting JSON-LD)
     const isDirectJobUrl =

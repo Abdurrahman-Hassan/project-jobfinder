@@ -10,8 +10,10 @@ import { sendOrDraftEmail } from './mailer/emailSender.js';
 import { saveLead, isDuplicateLead } from './tracker/db.js';
 import { isValidEmail } from './validation/schemas.js';
 import { isStaffingOrAgencyText } from './discovery/searchEngine.js';
+import { autoLoadResumeFromFolder } from './importer/resumeParser.js';
 
 export async function processJobTarget(targetUrl: string): Promise<ProcessedJobLead[]> {
+  await autoLoadResumeFromFolder().catch(() => {});
   const profile = getActiveProfile();
   console.log(chalk.bold.cyan(`\n🔍 Scraping target career page: ${targetUrl}`));
 
@@ -184,5 +186,144 @@ export async function processDirectJD(params: {
   }
 
   await saveLead(lead);
+  return lead;
+}
+
+export async function processStartupPitch(startupUrl: string): Promise<ProcessedJobLead | null> {
+  await autoLoadResumeFromFolder().catch(() => {});
+  const profile = getActiveProfile();
+
+  console.log(chalk.bold.magenta(`\n🚀 Reverse Sourcing: Analyzing startup landing page -> ${startupUrl}`));
+
+  let companyName = 'Startup Team';
+  let companyDomain = '';
+  try {
+    const parsed = new URL(startupUrl);
+    companyDomain = parsed.hostname.replace(/^www\./, '');
+    const cleanDomain = companyDomain.split('.')[0];
+    companyName = cleanDomain.charAt(0).toUpperCase() + cleanDomain.slice(1);
+  } catch {
+    console.error(chalk.red(`Invalid startup URL: ${startupUrl}`));
+    return null;
+  }
+
+  // 1. Scrape product overview
+  let productOverview = '';
+  try {
+    const jobs = await scrapeJobOrCareerPage(startupUrl);
+    if (jobs.length > 0 && jobs[0].descriptionText) {
+      productOverview = jobs[0].descriptionText.slice(0, 1000);
+      if (jobs[0].companyName && jobs[0].companyName !== 'Career Opening') {
+        companyName = jobs[0].companyName;
+      }
+    }
+  } catch {
+    // fallback
+  }
+
+  // 2. Lookup Decision Makers (Founders / Engineering Leadership)
+  console.log(chalk.gray(`  • Enriching founders and engineering leadership on Apollo for ${companyDomain}...`));
+  const apolloResult = await lookupApolloDecisionMaker(companyDomain, companyName);
+
+  const contactEmail = apolloResult?.email || `founders@${companyDomain}`;
+  const contactName = apolloResult?.name || `${companyName} Founders & Engineering Team`;
+  const contactTitle = apolloResult?.title || 'Founding & Engineering Team';
+
+  console.log(chalk.bold.green(`  🎯 Target: ${contactName} (${contactTitle}) -> ${contactEmail}`));
+
+  // 3. Deduplication Check
+  const { isDuplicate, reason } = await isDuplicateLead(companyDomain, contactEmail);
+  if (isDuplicate) {
+    console.log(chalk.yellow(`\n⏩ Skipping duplicate startup pitch [${companyName}]: ${reason}`));
+    return null;
+  }
+
+  const job: JobListing = {
+    url: startupUrl,
+    companyName,
+    companyDomain,
+    jobTitle: 'Founding Engineer / Platform Architect (Speculative)',
+    descriptionText: productOverview || `Building innovative platforms at ${companyName}`,
+    requirements: ['Next.js', 'TypeScript', 'Platform Architecture', 'AI/MCP', 'Full Stack'],
+    contactEmail,
+    contactName,
+    contactTitle
+  };
+
+  const analysis = await generateTailoredApplication(profile, job);
+  console.log(chalk.bold.yellow(`  📊 Startup Fit Score: ${analysis.matchScore}/10`));
+
+  const pdfPath = await generateResumePdf(profile, analysis, companyName);
+  console.log(chalk.green(`  📄 Generated Pitch Resume: ${pdfPath}`));
+
+  const lead: ProcessedJobLead = {
+    id: randomUUID(),
+    job,
+    analysis,
+    resumePdfPath: pdfPath,
+    status: 'TAILORED',
+    createdAt: new Date().toISOString()
+  };
+
+  const sendResult = await sendOrDraftEmail(lead);
+  if (sendResult.mode === 'SENT') {
+    lead.status = 'SENT';
+    lead.sentAt = new Date().toISOString();
+  } else {
+    lead.emailDraftPath = sendResult.draftPath;
+  }
+
+  await saveLead(lead);
+  console.log(chalk.bold.cyan(`  📝 Speculative startup pitch drafted to ${lead.emailDraftPath || 'output/drafts/'}`));
+  return lead;
+}
+
+export async function processCompanyOpportunity(companyUrl: string): Promise<ProcessedJobLead | null> {
+  const { crawlCompanyWebsiteAndExtractOpportunity } = await import('./scraper/companyDeepCrawler.js');
+  const crawlResult = await crawlCompanyWebsiteAndExtractOpportunity(companyUrl);
+  if (!crawlResult) return null;
+
+  await autoLoadResumeFromFolder().catch(() => {});
+  const profile = getActiveProfile();
+
+  const { companyName, companyDomain, hasActiveRole, job } = crawlResult;
+
+  // 1. Deduplication Check
+  const { isDuplicate, reason } = await isDuplicateLead(companyDomain, job.contactEmail);
+  if (isDuplicate) {
+    console.log(chalk.yellow(`\n⏩ Skipping duplicate company [${companyName}]: ${reason}`));
+    return null;
+  }
+
+  // 2. Tailor Application (Custom Role-Tailored vs. Speculative Master Pitch)
+  const analysis = await generateTailoredApplication(profile, job);
+  const scoreLabel = hasActiveRole ? 'ATS Role Match Score' : 'Speculative Fit Score';
+  console.log(chalk.bold.yellow(`  📊 ${scoreLabel}: ${analysis.matchScore}/10`));
+
+  // 3. Compile Tailored PDF Resume
+  const pdfPath = await generateResumePdf(profile, analysis, companyName);
+  console.log(chalk.green(`  📄 Generated Resume: ${pdfPath}`));
+
+  // 4. Draft Cold Email & Save Lead
+  const lead: ProcessedJobLead = {
+    id: randomUUID(),
+    job,
+    analysis,
+    resumePdfPath: pdfPath,
+    status: 'TAILORED',
+    createdAt: new Date().toISOString()
+  };
+
+  const sendResult = await sendOrDraftEmail(lead);
+  if (sendResult.mode === 'SENT') {
+    lead.status = 'SENT';
+    lead.sentAt = new Date().toISOString();
+  } else {
+    lead.emailDraftPath = sendResult.draftPath;
+  }
+
+  await saveLead(lead);
+  const modeText = hasActiveRole ? 'Custom role application' : 'Speculative senior pitch';
+  console.log(chalk.bold.cyan(`  📝 ${modeText} drafted to ${lead.emailDraftPath || 'output/drafts/'}`));
   return lead;
 }

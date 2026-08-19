@@ -95,11 +95,46 @@ function generateIntelligentTailoredProfile(
   const topMatchingHighlights =
     matchingKeywords.slice(0, 3).join(', ') || 'Next.js, Node.js, and Cloud Infrastructure';
 
-  const coldEmailSubject = sanitizeSubject(
+  const isSpeculative =
+    job.jobTitle.toLowerCase().includes('speculative') ||
+    job.jobTitle.toLowerCase().includes('startup pitch') ||
+    job.jobTitle.toLowerCase().includes('collaboration') ||
+    job.descriptionText.length < 150;
+
+  let coldEmailSubject = sanitizeSubject(
     `Software Engineer Application - ${job.jobTitle} - ${profile.name}`
   );
 
-  const coldEmailBody = `${recipientGreeting}
+  let coldEmailBody = '';
+
+  if (isSpeculative) {
+    coldEmailSubject = sanitizeSubject(
+      `Exploring Engineering Collaboration with ${job.companyName} — ${profile.name} (Full-Stack & Platform Architect)`
+    );
+
+    coldEmailBody = `${recipientGreeting}
+
+I've been closely following what you're building at ${job.companyName}.
+
+As a Full-Stack Engineer & Platform Architect specializing in ${topMatchingHighlights}, I wanted to reach out directly to explore if you're looking for high-leverage engineering support to accelerate feature delivery or scale your platform.
+
+A quick snapshot of relevant platforms I've architected:
+• Transcend (AI / MCP): Independently built an AI visual builder platform integrating Model Context Protocol (MCP) execution workflows and drag-and-drop canvas interactions.
+• Aga Khan University & Hospital: Spearheaded enterprise web modernization using Next.js (App Router) + Storyblok Headless CMS for high-traffic multi-site delivery.
+• BoxBuy (SaaS): Led distributed engineering to build a multi-tenant hospitality SaaS platform on GCP with Docker, cutting infrastructure costs by 35%.
+
+Whether you are actively expanding the team or exploring autonomous builders for upcoming platform initiatives, I would love to connect and share ideas on how I can add immediate velocity to ${job.companyName}.
+
+I have attached my resume for your review. Would you be open to a brief 10-minute introductory conversation this week?
+
+Best regards,
+${profile.name}
+Portfolio: ${profile.portfolio || ''}
+GitHub: ${profile.github || ''}
+LinkedIn: ${profile.linkedin || ''}
+Phone: ${profile.phone || ''}`;
+  } else {
+    coldEmailBody = `${recipientGreeting}
 
 I came across ${job.companyName}'s opening for the ${job.jobTitle} position and wanted to reach out directly.
 
@@ -116,6 +151,7 @@ Portfolio: ${profile.portfolio || ''}
 GitHub: ${profile.github || ''}
 LinkedIn: ${profile.linkedin || ''}
 Phone: ${profile.phone || ''}`;
+  }
 
   // 5. Tailored Cover Letter (using dynamic candidate info)
   const coverLetter = `Dear Hiring Team at ${job.companyName},
@@ -200,8 +236,8 @@ Description: ${(job.descriptionText || '').slice(0, 3000)}
 Requirements: ${JSON.stringify(job.requirements || [])}`;
 
   let res: any;
-  let retries = 3;
-  let delayMs = 2000;
+  let retries = 1;
+  let delayMs = 1000;
 
   while (retries > 0) {
     try {
@@ -222,7 +258,7 @@ Requirements: ${JSON.stringify(job.requirements || [])}`;
             'X-Title': 'JobFinder Pro',
             'Content-Type': 'application/json'
           },
-          timeout: 25000,
+          timeout: 4000,
           maxContentLength: 5 * 1024 * 1024,
           maxBodyLength: 5 * 1024 * 1024
         }
@@ -235,7 +271,7 @@ Requirements: ${JSON.stringify(job.requirements || [])}`;
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         delayMs *= 2;
       } else {
-        throw err;
+        return null;
       }
     }
   }
