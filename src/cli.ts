@@ -92,21 +92,32 @@ function resolveLimit(cliOption?: string, fallback: number = 5): number {
   return fallback;
 }
 
+function resolveRegion(cliOption?: string, fallback: string = 'Worldwide'): string {
+  if (cliOption && cliOption.trim().length > 0) {
+    return cliOption.trim();
+  }
+  const envRegion = process.env.DEFAULT_SEARCH_REGION;
+  if (envRegion && envRegion.trim().length > 0) {
+    return envRegion.trim();
+  }
+  return fallback;
+}
+
 // 2d. Autonomous Company & Software House Discovery & Deep-Crawl
 program
   .command('company-hunt <query>')
   .description('Discover software houses / startups matching a query, deep-crawl their pages, and apply (custom or speculative)')
   .option('-l, --limit <number>', 'Number of companies to find (or set DEFAULT_SEARCH_LIMIT in .env)')
-  .option('-r, --region <region>', 'Target region', '')
+  .option('-r, --region <region>', 'Target region (e.g. Remote, US, Europe, Worldwide)')
   .action(async (query: string, options) => {
     try {
       const { searchCompanyWebsites } = await import('./discovery/searchEngine.js');
       const { processCompanyOpportunity } = await import('./pipeline.js');
 
       const limit = resolveLimit(options.limit, 5);
-      const region = options.region || '';
+      const region = resolveRegion(options.region, 'Worldwide');
 
-      console.log(chalk.bold.magenta(`\n🏢 Searching software houses & company websites for: "${query}" [Limit: ${limit}]...`));
+      console.log(chalk.bold.magenta(`\n🏢 Searching software houses & company websites for: "${query}" [Region: ${region}] [Limit: ${limit}]...`));
       const targets = await searchCompanyWebsites(query, limit, region);
 
       if (targets.length === 0) {

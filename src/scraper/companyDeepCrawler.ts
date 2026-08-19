@@ -53,7 +53,15 @@ export function extractCompaniesFromListicleHtml(
     'facebook',
     'twitter',
     'pinterest',
-    'whatsapp'
+    'whatsapp',
+    'tell us your',
+    'meet top',
+    'interview and hire',
+    'how it works',
+    'get started',
+    'sign up',
+    'hire developers',
+    'hire talent'
   ];
 
   // Target main article content headings first to avoid sidebar/comment timestamps

@@ -111,7 +111,9 @@ export async function optimizeSearchQueryWithLLM(
   return [
     `${clean} ${reg} software agency services -site:linkedin.com -site:indeed.com`,
     `${clean} ${reg} web development company contact -site:linkedin.com`,
-    `software house ${clean} ${reg} -site:linkedin.com`
+    `software house ${clean} ${reg} -site:linkedin.com`,
+    `${clean} ${reg} tech product startup "careers" -site:linkedin.com`,
+    `${clean} ${reg} engineering team "about us" -site:linkedin.com`
   ];
 }
 
@@ -125,11 +127,9 @@ export async function filterAndSelectCompaniesWithLLM(
 ): Promise<VettedCompanyTarget[]> {
   if (rawResults.length === 0) return [];
 
-  console.log(chalk.gray(`  • Vetting ${rawResults.length} search results with AI to filter out agencies & aggregators...`));
-
   // Build ultra-compact candidate list (title + domain only, no bloated HTML snippets)
   const compactCandidates = rawResults
-    .slice(0, 10)
+    .slice(0, 30)
     .map((r, i) => `${i + 1}. ${r.title.slice(0, 50)} | ${r.url}`)
     .join('\n');
 
@@ -192,6 +192,15 @@ Format: {"companies":[{"name":"Name","url":"https://domain.com"}]}`;
     'freelancer.com',
     'turing.com',
     'toptal.com',
+    'youtube.com',
+    'vimeo.com',
+    'themeforest.net',
+    'envato.com',
+    'dice.com',
+    'crossover.com',
+    'arc.dev',
+    'remoteok.com',
+    'weworkremotely.com',
     'urdupoint.com',
     'blogpakistan.pk',
     'superbcompanies.com',

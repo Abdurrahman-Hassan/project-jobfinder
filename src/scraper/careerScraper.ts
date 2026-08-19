@@ -346,6 +346,33 @@ export async function scrapeJobOrCareerPage(targetUrl: string): Promise<JobListi
         .replace(/\s+/g, ' ')
         .trim();
 
+      const EXCLUDED_PORTAL_DOMAINS = [
+        'arbeitnow.com',
+        'remotive.com',
+        'jobicy.com',
+        'greenhouse.io',
+        'lever.co',
+        'ashbyhq.com',
+        'workable.com',
+        'smartrecruiters.com',
+        'breezy.hr',
+        'applytojob.com',
+        'reactjobs.io',
+        'arc.dev',
+        'wantremote.com',
+        'workingnomads.com',
+        'remoteok.com',
+        'github.com'
+      ];
+
+      let cleanedContactEmail = primaryContactEmail;
+      if (
+        cleanedContactEmail &&
+        EXCLUDED_PORTAL_DOMAINS.some((d) => cleanedContactEmail!.toLowerCase().includes(d))
+      ) {
+        cleanedContactEmail = undefined;
+      }
+
       return [
         {
           url,
@@ -354,7 +381,7 @@ export async function scrapeJobOrCareerPage(targetUrl: string): Promise<JobListi
           jobTitle: smartTitle,
           descriptionText: cleanDescription.slice(0, 5000),
           requirements: reqs.slice(0, 15),
-          contactEmail: primaryContactEmail
+          contactEmail: cleanedContactEmail
         }
       ];
     }

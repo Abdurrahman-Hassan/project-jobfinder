@@ -969,6 +969,19 @@ export async function searchCompanyWebsites(
       const ddgUrl = `https://duckduckgo.com/?q=${encodeURIComponent(q)}&ia=web`;
       await page.goto(ddgUrl, { waitUntil: 'networkidle2', timeout: 20000 });
 
+      // If high limit requested, scroll down to load more organic results dynamically
+      if (limit > 10) {
+        await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          const moreBtn = await page.$('button[id*="more"], a.result--more__btn, button[data-testid="more-results"]');
+          if (moreBtn) {
+            await moreBtn.click();
+            await new Promise((r) => setTimeout(r, 1200));
+          }
+        } catch {}
+      }
+
       const rawResults = await page.evaluate(() => {
         const items: { title: string; url: string; snippet: string }[] = [];
         document.querySelectorAll('article, li[data-layout="organic"]').forEach((el) => {
