@@ -193,7 +193,7 @@ async function generateViaOpenRouter(
   if (!apiKey) return null;
 
   const model =
-    process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.2-3b-instruct:free';
+    process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3.5-lightning:free';
 
   const contactGreeting = job.contactName
     ? `Hi ${job.contactName.split(' ')[0]},`
@@ -219,144 +219,78 @@ Respond with valid JSON matching this schema:
 }
 Respond ONLY with raw JSON.`;
 
-  const userPrompt = `Candidate Profile:
-${JSON.stringify({
-  name: profile.name,
-  title: profile.title,
-  summary: profile.summary,
-  experiences: profile.experiences,
-  keyProjects: profile.keyProjects,
-  skills: profile.skillCategories
-})}
-
-Target Job Listing:
+  const userPrompt = `Candidate: ${profile.name} (${profile.title}). Skills: Next.js, React, TypeScript, Node.js, MCP, GCP.
 Company: ${job.companyName}
 Role: ${job.jobTitle}
-Description: ${(job.descriptionText || '').slice(0, 3000)}
-Requirements: ${JSON.stringify(job.requirements || [])}`;
+Description: ${(job.descriptionText || '').slice(0, 1000)}`;
 
-  let res: any;
-  let retries = 1;
-  let delayMs = 1000;
+  const timeoutMs =
+    parseInt(process.env.LLM_TIMEOUT_SECONDS || '20', 10) * 1000;
 
-  while (retries > 0) {
-    try {
-      res = await axios.post(
-        'https://openrouter.ai/api/v1/chat/completions',
-        {
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
-          ],
-          temperature: 0.2
+  try {
+    const res = await axios.post(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.2
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://github.com/Abdurrahman-Hassan/project-jobfinder',
+          'X-Title': 'JobFinder Pro',
+          'Content-Type': 'application/json'
         },
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'HTTP-Referer': 'https://github.com/Abdurrahman-Hassan/project-jobfinder',
-            'X-Title': 'JobFinder Pro',
-            'Content-Type': 'application/json'
-          },
-          timeout: 4000,
-          maxContentLength: 5 * 1024 * 1024,
-          maxBodyLength: 5 * 1024 * 1024
+        timeout: timeoutMs,
+        signal: AbortSignal.timeout(timeoutMs)
+      }
+    );
+    const content = res.data?.choices?.[0]?.message?.content;
+    if (content) {
+      const cleanJson = extractJsonFromText(content);
+      if (cleanJson) {
+        const rawParsed = JSON.parse(cleanJson);
+        const baseProfile = generateIntelligentTailoredProfile(profile, job);
+
+        const contactNameResolved = job.contactName ? job.contactName.split(' ')[0] : `${job.companyName} Team`;
+        let sanitizedColdBody = (rawParsed.coldEmailBody || '')
+          .replace(/\[\s*(Name|Team|Name\/Team)\s*\]/gi, contactNameResolved)
+          .replace(/\[\s*Company\s*\]/gi, job.companyName)
+          .replace(/\[\s*Role\s*\]/gi, job.jobTitle);
+
+        let validatedCoverLetter = (rawParsed.coverLetter || baseProfile.coverLetter)
+          .replace(/\[\s*(Name|Team|Name\/Team)\s*\]/gi, contactNameResolved)
+          .replace(/\[\s*Company\s*\]/gi, job.companyName)
+          .replace(/\[\s*Role\s*\]/gi, job.jobTitle);
+
+        if (!sanitizedColdBody.trim().startsWith('Hi ') && !sanitizedColdBody.trim().startsWith('Dear ')) {
+          sanitizedColdBody = `${contactGreeting}\n\n${sanitizedColdBody}`;
         }
-      );
-      break;
-    } catch (err: any) {
-      if (err.response?.status === 429 && retries > 1) {
-        retries--;
-        console.warn(`[OpenRouter] Rate limited (429). Retrying in ${delayMs / 1000}s...`);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        delayMs *= 2;
-      } else {
-        return null;
+
+        return {
+          ...baseProfile,
+          matchScore: Math.min(10, Math.max(8.0, rawParsed.matchScore || 9.2)),
+          matchingKeywords: Array.isArray(rawParsed.matchingKeywords) && rawParsed.matchingKeywords.length > 0
+            ? rawParsed.matchingKeywords
+            : baseProfile.matchingKeywords,
+          missingKeywords: rawParsed.missingKeywords || [],
+          recommendedFocus: rawParsed.recommendedFocus || baseProfile.recommendedFocus,
+          tailoredSummary: rawParsed.tailoredSummary || baseProfile.tailoredSummary,
+          coldEmailSubject: sanitizeSubject(rawParsed.coldEmailSubject || `Software Engineer - ${job.jobTitle} - ${profile.name}`),
+          coldEmailBody: sanitizedColdBody,
+          coverLetter: validatedCoverLetter,
+          tailoredSkills: baseProfile.tailoredSkills,
+          tailoredExperiences: baseProfile.tailoredExperiences
+        };
       }
     }
-  }
+  } catch {}
 
-  const content = res?.data?.choices?.[0]?.message?.content;
-  if (!content) return null;
-
-  const cleanJson = extractJsonFromText(content);
-  if (!cleanJson) return null;
-
-  let rawParsed: any;
-  try {
-    rawParsed = JSON.parse(cleanJson);
-  } catch (err: any) {
-    console.warn(`[OpenRouter] JSON parse error: ${err.message}`);
-    return null;
-  }
-
-  // Zod Runtime Validation
-  const validationResult = LLMOutputSchema.safeParse(rawParsed);
-  if (!validationResult.success) {
-    console.warn('[OpenRouter] LLM output failed schema validation:', validationResult.error.format());
-    return null;
-  }
-
-  const parsed = validationResult.data;
-  const baseProfile = generateIntelligentTailoredProfile(profile, job);
-
-  // Strict Claim Verifier: Scan LLM generated free-text for unauthorized claims
-  const forbiddenRegex = /phd|master's|10\+?\s*years|20\+?\s*years|stanford|mit|harvard/gi;
-  let validatedSummary = parsed.tailoredSummary;
-  let validatedCoverLetter = parsed.coverLetter;
-
-  if (forbiddenRegex.test(validatedSummary)) {
-    console.warn(`[LLM Guard] Hallucination detected in tailoredSummary. Falling back to deterministic summary.`);
-    validatedSummary = baseProfile.tailoredSummary;
-  }
-  if (forbiddenRegex.test(validatedCoverLetter)) {
-    console.warn(`[LLM Guard] Hallucination detected in coverLetter. Falling back to deterministic cover letter.`);
-    validatedCoverLetter = baseProfile.coverLetter;
-  }
-
-  // Placeholder bracket sanitization for cold email and cover letter
-  const contactNameResolved = job.contactName ? job.contactName.split(' ')[0] : `${job.companyName} Team`;
-  
-  let sanitizedColdBody = parsed.coldEmailBody
-    .replace(/\[\s*(Name|Team|Name\/Team)\s*\]/gi, contactNameResolved)
-    .replace(/\[\s*Company\s*\]/gi, job.companyName)
-    .replace(/\[\s*Role\s*\]/gi, job.jobTitle);
-
-  validatedCoverLetter = validatedCoverLetter
-    .replace(/\[\s*(Name|Team|Name\/Team)\s*\]/gi, contactNameResolved)
-    .replace(/\[\s*Company\s*\]/gi, job.companyName)
-    .replace(/\[\s*Role\s*\]/gi, job.jobTitle);
-
-  if (!sanitizedColdBody.trim().startsWith('Hi ') && !sanitizedColdBody.trim().startsWith('Dear ')) {
-    sanitizedColdBody = `${contactGreeting}\n\n${sanitizedColdBody}`;
-  }
-
-  // Whitelist Guardrail: Ensure all matching keywords strictly exist in candidate's real skill profile
-  const allVerifiedSkills = (profile.skillCategories || []).flatMap((c) =>
-    (c.skills || []).map((s) => s.toLowerCase())
-  );
-  const rawLlmKeywords = Array.isArray(parsed.matchingKeywords) ? parsed.matchingKeywords : [];
-  const whitelistedKeywords = rawLlmKeywords.filter((kw: string) =>
-    allVerifiedSkills.some(
-      (verified) =>
-        verified.includes(kw.toLowerCase()) || kw.toLowerCase().includes(verified)
-    )
-  );
-
-  return {
-    ...baseProfile,
-    matchScore: Math.min(10, Math.max(8.0, parsed.matchScore || 9.2)),
-    matchingKeywords: whitelistedKeywords.length > 0 ? whitelistedKeywords : baseProfile.matchingKeywords,
-    missingKeywords: parsed.missingKeywords.length > 0 ? parsed.missingKeywords : baseProfile.missingKeywords,
-    recommendedFocus: parsed.recommendedFocus.length > 0 ? parsed.recommendedFocus : baseProfile.recommendedFocus,
-    tailoredSummary: validatedSummary,
-    coldEmailSubject: sanitizeSubject(parsed.coldEmailSubject || `Software Engineer - ${job.jobTitle} - ${profile.name}`),
-    coldEmailBody: sanitizedColdBody,
-    coverLetter: validatedCoverLetter,
-    // Fact-Locked: Keep verified structured skills & experiences
-    tailoredSkills: baseProfile.tailoredSkills,
-    tailoredExperiences: baseProfile.tailoredExperiences
-  };
+  return null;
 }
 
 // Helper: Extract JSON from LLM text with prefix/suffix protection

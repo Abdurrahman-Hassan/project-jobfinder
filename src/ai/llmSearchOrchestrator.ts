@@ -16,8 +16,11 @@ export interface VettedCompanyTarget {
 export async function callUniversalLLM(
   systemPrompt: string,
   userPrompt: string,
-  timeoutMs: number = 3500
+  timeoutMs?: number
 ): Promise<string | null> {
+  const resolvedTimeout =
+    timeoutMs || parseInt(process.env.LLM_TIMEOUT_SECONDS || '20', 10) * 1000;
+
   // 1. Google Gemini Direct REST API
   const geminiKey = process.env.GEMINI_API_KEY;
   if (geminiKey && geminiKey.length > 10) {
@@ -34,7 +37,7 @@ export async function callUniversalLLM(
           ],
           generationConfig: { temperature: 0.1 }
         },
-        { timeout: timeoutMs }
+        { timeout: resolvedTimeout, signal: AbortSignal.timeout(resolvedTimeout) }
       );
       const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (text) return text;
@@ -48,7 +51,7 @@ export async function callUniversalLLM(
       const res = await axios.post(
         'https://openrouter.ai/api/v1/chat/completions',
         {
-          model: 'nvidia/nemotron-3.5-lightning:free',
+          model: process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3.5-lightning:free',
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt }
@@ -60,7 +63,8 @@ export async function callUniversalLLM(
             Authorization: `Bearer ${openRouterKey}`,
             'Content-Type': 'application/json'
           },
-          timeout: timeoutMs
+          timeout: resolvedTimeout,
+          signal: AbortSignal.timeout(resolvedTimeout)
         }
       );
       const text = res.data?.choices?.[0]?.message?.content;
@@ -72,7 +76,7 @@ export async function callUniversalLLM(
 }
 
 /**
- * Step 1: LLM Query Optimizer
+ * Step 1: LLM Query Optimizer (Ultra-Low Token Usage ~50 tokens)
  * Transforms raw user input into 3 high-intent corporate discovery queries.
  */
 export async function optimizeSearchQueryWithLLM(
@@ -84,13 +88,11 @@ export async function optimizeSearchQueryWithLLM(
   const clean = rawQuery.replace(/["']/g, '').trim();
   const reg = region && region.toLowerCase() !== 'any' ? region : '';
 
-  const systemPrompt = `You are a search query strategist. Given a query, return 3 Bing/DDG queries to find DIRECT tech company homepages (not blogs, not job boards, not recruiting agencies).
-Format: { "queries": ["q1", "q2", "q3"] }`;
-
-  const userPrompt = `Query: "${rawQuery}" Region: "${reg}"`;
+  const systemPrompt = `You are a search strategist. Return JSON: {"queries":["q1","q2","q3"]} with 3 Bing/DDG queries to find direct corporate software houses & startups (not blogs, job boards, or staffing agencies).`;
+  const userPrompt = `Query: "${clean.slice(0, 80)}" ${reg ? `Region: "${reg}"` : ''}`;
 
   try {
-    const rawResponse = await callUniversalLLM(systemPrompt, userPrompt, 3000);
+    const rawResponse = await callUniversalLLM(systemPrompt, userPrompt);
     if (rawResponse) {
       const firstBrace = rawResponse.indexOf('{');
       const lastBrace = rawResponse.lastIndexOf('}');
@@ -98,7 +100,7 @@ Format: { "queries": ["q1", "q2", "q3"] }`;
         const parsed = JSON.parse(rawResponse.slice(firstBrace, lastBrace + 1));
         if (Array.isArray(parsed.queries) && parsed.queries.length > 0) {
           console.log(chalk.bold.green(`  ✓ AI Generated ${parsed.queries.length} precision search queries`));
-          return parsed.queries;
+          return parsed.queries.slice(0, 3);
         }
       }
     }
@@ -107,14 +109,14 @@ Format: { "queries": ["q1", "q2", "q3"] }`;
   // Smart Deterministic Query Expansion Fallback
   console.log(chalk.gray(`  • Using deterministic search query expansion`));
   return [
-    `"software development company" ${clean} ${reg} -site:linkedin.com -site:indeed.com`,
-    `"software house" ${clean} ${reg} "services" "about us" -site:linkedin.com`,
-    `"web development company" ${clean} ${reg} "contact" -site:linkedin.com`
+    `${clean} ${reg} software agency services -site:linkedin.com -site:indeed.com`,
+    `${clean} ${reg} web development company contact -site:linkedin.com`,
+    `software house ${clean} ${reg} -site:linkedin.com`
   ];
 }
 
 /**
- * Step 2: LLM Web Target Vetting & Filter
+ * Step 2: LLM Web Target Vetting & Filter (Ultra-Low Token Usage ~150 tokens)
  * Analyzes raw search results and filters out staffing agencies, job boards, and listicles.
  */
 export async function filterAndSelectCompaniesWithLLM(
@@ -125,34 +127,42 @@ export async function filterAndSelectCompaniesWithLLM(
 
   console.log(chalk.gray(`  • Vetting ${rawResults.length} search results with AI to filter out agencies & aggregators...`));
 
-  const systemPrompt = `You are a tech recruiter vetting agent.
-Analyze these search results. Extract ONLY DIRECT software companies/startups (discard staffing agencies, job boards, blog listicles).
-Format:
-{
-  "companies": [
-    {
-      "companyName": "Name",
-      "websiteUrl": "https://company.com",
-      "domain": "company.com",
-      "reasoning": "Direct software agency / tech company",
-      "isRecruitingAgency": false
-    }
-  ]
-}`;
+  // Build ultra-compact candidate list (title + domain only, no bloated HTML snippets)
+  const compactCandidates = rawResults
+    .slice(0, 10)
+    .map((r, i) => `${i + 1}. ${r.title.slice(0, 50)} | ${r.url}`)
+    .join('\n');
 
-  const userPrompt = `Search Results:\n${JSON.stringify(rawResults.slice(0, 10), null, 2)}`;
+  const systemPrompt = `You are a tech recruiter. From the list, extract ONLY direct software companies/startups. Exclude job boards, staffing agencies, directories, and blogs.
+Format: {"companies":[{"name":"Name","url":"https://domain.com"}]}`;
+
+  const userPrompt = `Candidates:\n${compactCandidates}`;
 
   try {
-    const rawResponse = await callUniversalLLM(systemPrompt, userPrompt, 3500);
+    const rawResponse = await callUniversalLLM(systemPrompt, userPrompt);
     if (rawResponse) {
       const firstBrace = rawResponse.indexOf('{');
       const lastBrace = rawResponse.lastIndexOf('}');
       if (firstBrace !== -1 && lastBrace !== -1) {
         const parsed = JSON.parse(rawResponse.slice(firstBrace, lastBrace + 1));
         if (Array.isArray(parsed.companies) && parsed.companies.length > 0) {
-          const vetted = parsed.companies.filter(
-            (c: VettedCompanyTarget) => !c.isRecruitingAgency && c.websiteUrl && c.websiteUrl.startsWith('http')
-          );
+          const vetted: VettedCompanyTarget[] = [];
+          for (const c of parsed.companies) {
+            const url = c.url || c.websiteUrl;
+            if (url && url.startsWith('http')) {
+              try {
+                const parsedUrl = new URL(url);
+                const domain = parsedUrl.hostname.replace(/^www\./, '');
+                vetted.push({
+                  companyName: c.name || c.companyName || domain.split('.')[0],
+                  websiteUrl: `${parsedUrl.protocol}//${parsedUrl.hostname}`,
+                  domain,
+                  reasoning: 'Direct corporate tech provider verified by AI vetting',
+                  isRecruitingAgency: false
+                });
+              } catch {}
+            }
+          }
           if (vetted.length > 0) {
             console.log(chalk.bold.green(`  ✓ AI Vetted ${vetted.length} direct non-agency company targets`));
             return vetted;
@@ -182,6 +192,13 @@ Format:
     'freelancer.com',
     'turing.com',
     'toptal.com',
+    'urdupoint.com',
+    'blogpakistan.pk',
+    'superbcompanies.com',
+    'agencyreview.dev',
+    'seonextlevel.com',
+    'znwebpro.com',
+    'zorexadigital.com',
     'thedesignsfirm.com',
     'dakaan.pk',
     'rehbar.pk',

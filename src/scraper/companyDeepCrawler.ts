@@ -43,22 +43,54 @@ export function extractCompaniesFromListicleHtml(
     'related posts',
     'contact us',
     'leave a reply',
-    'share this'
+    'share this',
+    'comments',
+    'posted by',
+    'written by',
+    'author',
+    'min read',
+    'share on',
+    'facebook',
+    'twitter',
+    'pinterest',
+    'whatsapp'
   ];
 
-  $('h2, h3, h4, strong, li').each((_, el) => {
+  // Target main article content headings first to avoid sidebar/comment timestamps
+  const targetElements = $('article h2, article h3, article h4, .entry-content h2, .entry-content h3, .post-content h2, .post-content h3, main h2, main h3');
+  const elementsToScan = targetElements.length > 0 ? targetElements : $('h2, h3, h4, strong');
+
+  elementsToScan.each((_, el) => {
     const text = $(el).text().trim();
+
+    // Reject timestamps, dates, and comment times (e.g. "4:30 pm", "12:57 AM", "August 2026", "2 mins ago")
+    if (
+      /\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i.test(text) ||
+      /^\d+\s*(?:am|pm)$/i.test(text) ||
+      /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(text) ||
+      /\b(?:minutes?|hours?|days?|ago)\b/i.test(text)
+    ) {
+      return;
+    }
+
     const match = text.match(/^(?:(?:\d+|#\d+|top\s*\d+)[\.\):\s-]*)([A-Za-z0-9\s&.-]{2,35})(?:\s*[-–:|(\[]|$)/i);
     if (match && match[1]) {
-      const candidateName = match[1].trim();
+      let candidateName = match[1].trim();
+
+      // Clean trailing punctuation or qualifiers
+      candidateName = candidateName.replace(/[-–:|(\[].*$/, '').trim();
       const lower = candidateName.toLowerCase();
 
       if (
-        candidateName.length > 2 &&
+        candidateName.length >= 3 &&
         candidateName.length < 35 &&
+        !/^\d+$/.test(candidateName) &&
+        !/^\d+\s*(?:am|pm)$/i.test(candidateName) &&
         !BLOCKED_LISTICLE_WORDS.some((w) => lower.includes(w)) &&
         !lower.includes('software house') &&
-        !lower.includes('companies in')
+        !lower.includes('companies in') &&
+        !lower.includes('updated') &&
+        !lower.includes('rating')
       ) {
         let candidateWebsite = '';
         const a = $(el).find('a').length ? $(el).find('a') : $(el).next().find('a');
@@ -76,7 +108,7 @@ export function extractCompaniesFromListicleHtml(
 
         if (!candidateWebsite) {
           const domGuess = `${candidateName.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`;
-          if (!seenDomains.has(domGuess)) {
+          if (!seenDomains.has(domGuess) && !domGuess.startsWith('pm') && !domGuess.startsWith('am')) {
             candidateWebsite = `https://${domGuess}`;
             seenDomains.add(domGuess);
           }
@@ -134,17 +166,17 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
 
   const $ = cheerio.load(homepageHtml || '<html><body></body></html>');
 
-  // Check if target is a listicle article (e.g. "Top 10 Software Houses in Karachi")
+  // Check if target is a listicle article (e.g. "Top 10 Software Houses in Karachi", "Top 15 Software Houses in Islamabad")
   const pageTitle = $('title').text().toLowerCase();
   const isListicle =
-    pageTitle.includes('top 10') ||
-    pageTitle.includes('top 20') ||
-    pageTitle.includes('list of') ||
-    pageTitle.includes('best software') ||
-    pageTitle.includes('best it companies') ||
-    targetUrl.includes('/top-') ||
-    targetUrl.includes('/list-of-') ||
-    targetUrl.includes('/best-');
+    /top\s*\d+/i.test(pageTitle) ||
+    /list\s*of/i.test(pageTitle) ||
+    /\d+\s*best/i.test(pageTitle) ||
+    /best\s*software/i.test(pageTitle) ||
+    /best\s*it\s*companies/i.test(pageTitle) ||
+    /\/top-|\/list-of-|\/best-/i.test(targetUrl) ||
+    domain.includes('blog') ||
+    domain.includes('techmag');
 
   if (isListicle && homepageHtml.length > 500) {
     const unpacked = extractCompaniesFromListicleHtml(homepageHtml, targetUrl);
@@ -282,30 +314,86 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
     } catch {}
   }
 
-  const allDiscoveredEmails = Array.from(
-    new Set([...careerPageEmails, ...homepageEmails, ...contactPageEmails])
-  );
+  // 3. Adaptive Qualification: Active Role vs. Speculative Tech Pitch
+  let allEmails = [...careerPageEmails, ...homepageEmails, ...contactPageEmails];
 
-  const nonGeneral = allDiscoveredEmails.filter(
+  // Discard generic non-inbox patterns and unwanted system addresses
+  allEmails = allEmails.filter(
     (e) =>
-      !e.includes('investor') &&
-      !e.includes('legal') &&
-      !e.includes('privacy') &&
-      !e.includes('dpo') &&
-      !e.includes('press') &&
-      !e.includes('media')
+      !e.includes('example.com') &&
+      !e.includes('sentry.io') &&
+      !e.includes('wixpress.com') &&
+      !e.includes('domain.com') &&
+      !e.includes('legal@') &&
+      !e.includes('privacy@') &&
+      !e.includes('investor@') &&
+      !e.includes('press@') &&
+      !e.includes('abuse@')
   );
 
-  const primaryContactEmail =
-    nonGeneral.find((e) => e.includes('career') || e.includes('job') || e.includes('hr') || e.includes('talent') || e.includes('recruit')) ||
-    nonGeneral.find((e) => e.includes('contact') || e.includes('info') || e.includes('hi@') || e.includes('hello@') || e.includes('team@')) ||
-    nonGeneral[0] ||
-    `careers@${domain}`;
+  let targetRecipientEmail = '';
+  if (allEmails.length > 0) {
+    const hiringPriority = allEmails.find((e) =>
+      /career|job|hr|talent|hiring|recruit|founder|ceo|cto|engineering|tech|team|hello|hi|info|contact/i.test(e)
+    );
+    targetRecipientEmail = hiringPriority || allEmails[0];
+  } else {
+    targetRecipientEmail = `careers@${domain}`;
+  }
+
+  // 4. Intelligent Site Nature Classification
+  // If no active engineering role is listed, verify if company is actually a tech/software business
+  if (!activeRoleFound) {
+    const metaDesc = $('meta[name="description"]').attr('content') || $('meta[property="og:description"]').attr('content') || '';
+    const fullTextSample = `${pageTitle} ${metaDesc} ${$('body').text().slice(0, 4000)}`.toLowerCase();
+
+    const techSignals = [
+      'software development',
+      'web development',
+      'mobile app',
+      'custom software',
+      'saas',
+      'digital agency',
+      'it services',
+      'it consulting',
+      'cloud solutions',
+      'ui/ux design',
+      'full stack',
+      'technology solutions',
+      'software house',
+      'engineering team',
+      'api development',
+      'devops'
+    ];
+
+    const nonTechMediaSignals = [
+      'breaking news',
+      'latest news headlines',
+      'newspaper',
+      'editorial',
+      'horoscope',
+      'weather forecast',
+      'entertainment news',
+      'sports news',
+      'politics news',
+      'daily news'
+    ];
+
+    const techScore = techSignals.filter((s) => fullTextSample.includes(s)).length;
+    const mediaScore = nonTechMediaSignals.filter((s) => fullTextSample.includes(s)).length;
+
+    const isNonTechMedia = mediaScore >= 2 && mediaScore > techScore;
+
+    if (isNonTechMedia) {
+      console.log(chalk.yellow(`  ⏭️  Skipping speculative pitch: "${companyName}" is a general news/media site with no active engineering openings.`));
+      return null;
+    }
+  }
 
   // 3. Build Opportunity (Role-Tailored vs. High-Impact Speculative Master Pitch)
   if (activeRoleFound && detectedJobTitle) {
     console.log(chalk.bold.green(`  🎯 Active Role Found: "${detectedJobTitle}"`));
-    console.log(chalk.gray(`     Contact Inbox: ${primaryContactEmail}`));
+    console.log(chalk.green(`     Contact Inbox: ${chalk.bold(targetRecipientEmail)}`));
 
     const job: JobListing = {
       url: matchingRoleUrl,
@@ -314,7 +402,7 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
       jobTitle: detectedJobTitle,
       descriptionText: detectedJobDescription || `Full-Stack Software Engineering position at ${companyName}`,
       requirements: ['TypeScript', 'Next.js', 'Node.js', 'PostgreSQL', 'Full Stack'],
-      contactEmail: primaryContactEmail
+      contactEmail: targetRecipientEmail
     };
 
     return {
@@ -323,13 +411,13 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
       websiteUrl: targetUrl,
       hasActiveRole: true,
       job,
-      discoveredEmails: allDiscoveredEmails,
+      discoveredEmails: allEmails,
       careerPageUrl: careerLinks[0],
       contactPageUrl: contactLinks[0]
     };
   } else {
-    console.log(chalk.bold.yellow(`  💡 No Specific Open Role Found -> Generating Speculative Senior Pitch & Master Resume`));
-    console.log(chalk.gray(`     Contact Inbox: ${primaryContactEmail}`));
+    console.log(chalk.bold.cyan(`  💡 No Specific Open Role Found -> Generating Speculative Senior Pitch & Master Resume`));
+    console.log(chalk.cyan(`     Contact Inbox: ${chalk.bold(targetRecipientEmail)}`));
 
     const job: JobListing = {
       url: targetUrl,
@@ -338,7 +426,7 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
       jobTitle: 'Senior Software Engineer / Platform Architect (Speculative)',
       descriptionText: $('body').text().slice(0, 1000) || `Innovative software platforms and solutions at ${companyName}`,
       requirements: ['Next.js', 'TypeScript', 'Node.js', 'Architecture', 'Full Stack SaaS'],
-      contactEmail: primaryContactEmail
+      contactEmail: targetRecipientEmail
     };
 
     return {
@@ -347,7 +435,7 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
       websiteUrl: targetUrl,
       hasActiveRole: false,
       job,
-      discoveredEmails: allDiscoveredEmails,
+      discoveredEmails: allEmails,
       careerPageUrl: careerLinks[0],
       contactPageUrl: contactLinks[0]
     };

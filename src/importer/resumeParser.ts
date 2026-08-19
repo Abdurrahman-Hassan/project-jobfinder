@@ -1,17 +1,20 @@
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
-import axios from 'axios';
 import chalk from 'chalk';
 import { PDFParse } from 'pdf-parse';
 import { CandidateProfile } from '../types/index.js';
 import { DEFAULT_PROFILE } from '../config/profile.js';
 import { CandidateProfileSchema } from '../validation/schemas.js';
+import { callUniversalLLM } from '../ai/llmSearchOrchestrator.js';
 
 export async function parseResumeFileToProfile(filePath: string): Promise<CandidateProfile> {
   const resolvedPath = path.resolve(process.cwd(), filePath);
-  const ext = path.extname(resolvedPath).toLowerCase();
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`Resume file not found at: ${resolvedPath}`);
+  }
 
+  const ext = path.extname(resolvedPath).toLowerCase();
   let fileContent = '';
 
   if (ext === '.pdf') {
@@ -33,7 +36,7 @@ export async function parseResumeFileToProfile(filePath: string): Promise<Candid
       const parsed = JSON.parse(fileContent);
       const validation = CandidateProfileSchema.safeParse(parsed);
       if (!validation.success) {
-        throw new Error(`Invalid candidate profile JSON format: ${JSON.stringify(validation.error.format())}`);
+        throw new Error(`Invalid candidate profile JSON: ${JSON.stringify(validation.error.format())}`);
       }
       await saveProfileJson(validation.data);
       return validation.data;
@@ -42,21 +45,18 @@ export async function parseResumeFileToProfile(filePath: string): Promise<Candid
     }
   }
 
-  // 2. Fast LLM Extraction with Strict 4s Timeout
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (apiKey && apiKey.length > 10) {
-    try {
-      const llmProfile = await parseProfileWithLLM(fileContent, apiKey);
-      if (llmProfile) {
-        await saveProfileJson(llmProfile);
-        return llmProfile;
-      }
-    } catch {
-      // fallback to fast rule-based extractor
+  // 2. High-Accuracy AI Extraction
+  try {
+    const llmProfile = await parseProfileWithUniversalAI(fileContent);
+    if (llmProfile) {
+      await saveProfileJson(llmProfile);
+      return llmProfile;
     }
+  } catch (err: any) {
+    console.warn(chalk.yellow(`  [AI Resume Parser Fallback] ${err.message}`));
   }
 
-  // 3. Instant Deterministic / Rule-Based Parsing Fallback
+  // 3. Robust Heuristic / Section-Aware Parser Fallback
   const ruleProfile = parseProfileRuleBased(fileContent);
   await saveProfileJson(ruleProfile);
   return ruleProfile;
@@ -71,13 +71,12 @@ export async function saveProfileJson(profile: CandidateProfile): Promise<void> 
 
 /**
  * Automatically inspects the "resumes/" folder.
- * If a PDF, JSON, TXT, or MD resume exists, loads and updates profile.json automatically.
+ * If a PDF, JSON, TXT, or MD resume exists, loads or re-parses it automatically if modified.
  */
-export async function autoLoadResumeFromFolder(): Promise<CandidateProfile | null> {
+export async function autoLoadResumeFromFolder(): Promise<CandidateProfile> {
   const resumesDir = path.resolve(process.cwd(), 'resumes');
   if (!fs.existsSync(resumesDir)) {
     fs.mkdirSync(resumesDir, { recursive: true });
-    return null;
   }
 
   const files = fs.readdirSync(resumesDir).filter((f) => {
@@ -86,20 +85,35 @@ export async function autoLoadResumeFromFolder(): Promise<CandidateProfile | nul
     return ['.pdf', '.json', '.txt', '.md'].includes(ext);
   });
 
+  const profileJsonPath = path.resolve(process.cwd(), 'src', 'config', 'profile.json');
+
+  // If no resume in resumes/ folder, check if cached profile.json exists
   if (files.length === 0) {
-    return null;
+    if (fs.existsSync(profileJsonPath)) {
+      try {
+        return JSON.parse(fs.readFileSync(profileJsonPath, 'utf-8'));
+      } catch {}
+    }
+    return DEFAULT_PROFILE;
   }
 
-  // Pick the newest or primary file in resumes/
-  const primaryFile = files[0];
-  const fullPath = path.join(resumesDir, primaryFile);
-  const stats = fs.statSync(fullPath);
+  // Find most recently modified resume file in resumes/
+  let latestFile = files[0];
+  let latestMtime = 0;
+  for (const f of files) {
+    const s = fs.statSync(path.join(resumesDir, f));
+    if (s.mtimeMs > latestMtime) {
+      latestMtime = s.mtimeMs;
+      latestFile = f;
+    }
+  }
 
-  // Check if profile.json already exists and is newer than the resume file
-  const profileJsonPath = path.resolve(process.cwd(), 'src', 'config', 'profile.json');
+  const fullPath = path.join(resumesDir, latestFile);
+
+  // Check if profile.json already exists and is NEWER than the resume file
   if (fs.existsSync(profileJsonPath)) {
     const profileStats = fs.statSync(profileJsonPath);
-    if (profileStats.mtimeMs >= stats.mtimeMs) {
+    if (profileStats.mtimeMs >= latestMtime) {
       try {
         const cached = JSON.parse(fs.readFileSync(profileJsonPath, 'utf-8'));
         return cached;
@@ -109,25 +123,28 @@ export async function autoLoadResumeFromFolder(): Promise<CandidateProfile | nul
     }
   }
 
-  console.log(chalk.bold.magenta(`\n📄 Auto-detected base resume in "resumes/": ${primaryFile}`));
+  console.log(chalk.bold.magenta(`\n📄 Detected new or updated resume in "resumes/": ${latestFile}`));
+  console.log(chalk.gray(`  • Parsing and extracting candidate profile...`));
+
   try {
     const loadedProfile = await parseResumeFileToProfile(fullPath);
-    console.log(chalk.green(`✓ Profile for "${loadedProfile.name}" loaded and cached!`));
+    console.log(chalk.bold.green(`✓ Profile for "${loadedProfile.name}" successfully parsed & cached to src/config/profile.json!\n`));
     return loadedProfile;
   } catch (err: any) {
     console.warn(chalk.yellow(`[Resume Auto-Load Warning] ${err.message}`));
-    return null;
+    if (fs.existsSync(profileJsonPath)) {
+      try {
+        return JSON.parse(fs.readFileSync(profileJsonPath, 'utf-8'));
+      } catch {}
+    }
+    return DEFAULT_PROFILE;
   }
 }
 
-async function parseProfileWithLLM(
-  resumeText: string,
-  apiKey: string
+async function parseProfileWithUniversalAI(
+  resumeText: string
 ): Promise<CandidateProfile | null> {
-  const model = 'meta-llama/llama-3.2-3b-instruct:free';
-
-  const systemPrompt = `You are an expert HR parser. Extract JSON matching candidate profile schema from resume.
-Schema structure:
+  const systemPrompt = `You are an expert HR intelligence parser. Extract a clean candidate profile matching this exact JSON schema:
 {
   "name": "Full Name",
   "title": "Professional Title",
@@ -137,19 +154,23 @@ Schema structure:
   "linkedin": "LinkedIn URL",
   "github": "GitHub URL",
   "portfolio": "Portfolio URL",
-  "summary": "Professional summary",
+  "summary": "3-4 sentence professional summary",
   "skillCategories": [
-    { "category": "Category Name", "skills": ["Skill1", "Skill2"] }
+    { "category": "Languages", "skills": ["TypeScript", "Python"] },
+    { "category": "Frontend", "skills": ["Next.js", "React"] },
+    { "category": "Backend", "skills": ["Node.js", "NestJS"] },
+    { "category": "Databases", "skills": ["PostgreSQL", "Supabase"] },
+    { "category": "Cloud & DevOps", "skills": ["GCP", "Docker"] }
   ],
   "experiences": [
     {
-      "id": "unique-id",
+      "id": "company-slug",
       "company": "Company Name",
       "location": "Location",
-      "role": "Role Title",
-      "period": "Start - End",
-      "bullets": ["Bullet 1", "Bullet 2"],
-      "keywords": ["Keyword1", "Keyword2"]
+      "role": "Job Title",
+      "period": "Period (e.g. Dec 2025 - Present)",
+      "bullets": ["Achievement 1", "Achievement 2"],
+      "keywords": ["Next.js", "TypeScript"]
     }
   ],
   "keyProjects": [
@@ -157,7 +178,7 @@ Schema structure:
       "name": "Project Name",
       "tagline": "Short tagline",
       "description": "Description",
-      "technologies": ["Tech1", "Tech2"]
+      "technologies": ["Next.js", "MCP"]
     }
   ],
   "education": [
@@ -166,49 +187,29 @@ Schema structure:
       "institution": "Institution Name"
     }
   ],
-  "certifications": ["Cert 1"]
+  "certifications": ["Certification 1"]
 }
-Respond with raw JSON only.`;
+Respond with valid raw JSON only.`;
 
-  const res = await axios.post(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Resume Content:\n${resumeText.slice(0, 3000)}` }
-      ],
-      temperature: 0.1
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 4000,
-      maxContentLength: 5 * 1024 * 1024,
-      maxBodyLength: 5 * 1024 * 1024
-    }
-  );
+  const userPrompt = `Resume Content:\n${resumeText.slice(0, 4000)}`;
 
-  const content = res.data?.choices?.[0]?.message?.content;
-  if (!content) return null;
+  const raw = await callUniversalLLM(systemPrompt, userPrompt);
+  if (!raw) return null;
 
-  const firstBrace = content.indexOf('{');
-  const lastBrace = content.lastIndexOf('}');
+  const firstBrace = raw.indexOf('{');
+  const lastBrace = raw.lastIndexOf('}');
   if (firstBrace === -1 || lastBrace === -1) return null;
 
   try {
-    const cleanJson = content.slice(firstBrace, lastBrace + 1);
+    const cleanJson = raw.slice(firstBrace, lastBrace + 1);
     const parsed = JSON.parse(cleanJson);
     const validated = CandidateProfileSchema.safeParse(parsed);
     if (validated.success) {
       return validated.data;
     }
-    return null;
-  } catch {
-    return null;
-  }
+  } catch {}
+
+  return null;
 }
 
 function parseProfileRuleBased(rawText: string): CandidateProfile {

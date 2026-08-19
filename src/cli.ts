@@ -21,16 +21,23 @@ program
     await autoLoadResumeFromFolder().catch(() => {});
   });
 
-// 1. Import CV Command
+// 1. Import CV Command (Defaults to resumes/ folder if no path given)
 program
-  .command('import-cv <filePath>')
-  .description('Import a candidate CV (JSON, TXT, MD) and save as the active profile')
-  .action(async (filePath: string) => {
+  .command('import-cv [filePath]')
+  .description('Import a candidate CV (PDF, JSON, TXT, MD) or auto-load from "resumes/" folder by default')
+  .action(async (filePath?: string) => {
     try {
-      console.log(chalk.bold.blue(`📄 Importing candidate profile from: ${filePath}`));
-      const profile = await parseResumeFileToProfile(filePath);
-      console.log(chalk.bold.green(`\n✓ Successfully loaded profile for: ${profile.name} (${profile.title})`));
-      console.log(chalk.gray(`Skills: ${profile.skillCategories.map((c) => c.category).join(', ')}`));
+      if (filePath) {
+        console.log(chalk.bold.blue(`📄 Importing candidate profile from: ${filePath}`));
+        const profile = await parseResumeFileToProfile(filePath);
+        console.log(chalk.bold.green(`\n✓ Successfully loaded profile for: ${profile.name} (${profile.title})`));
+        console.log(chalk.gray(`Skills: ${profile.skillCategories.map((c) => c.category).join(', ')}`));
+      } else {
+        console.log(chalk.bold.blue(`📄 Scanning "resumes/" folder for base candidate resume...`));
+        const profile = await autoLoadResumeFromFolder();
+        console.log(chalk.bold.green(`\n✓ Successfully loaded active profile for: ${profile.name} (${profile.title})`));
+        console.log(chalk.gray(`Skills: ${profile.skillCategories.map((c) => c.category).join(', ')}`));
+      }
     } catch (err: any) {
       console.error(chalk.red(`Error importing CV: ${err.message}`));
     }
@@ -74,18 +81,29 @@ program
     }
   });
 
+function resolveLimit(cliOption?: string, fallback: number = 5): number {
+  if (cliOption && !isNaN(parseInt(cliOption, 10))) {
+    return Math.min(50, Math.max(1, parseInt(cliOption, 10)));
+  }
+  const envLimit = parseInt(process.env.DEFAULT_SEARCH_LIMIT || '', 10);
+  if (!isNaN(envLimit) && envLimit > 0) {
+    return Math.min(50, envLimit);
+  }
+  return fallback;
+}
+
 // 2d. Autonomous Company & Software House Discovery & Deep-Crawl
 program
   .command('company-hunt <query>')
   .description('Discover software houses / startups matching a query, deep-crawl their pages, and apply (custom or speculative)')
-  .option('-l, --limit <number>', 'Number of companies to find', '5')
+  .option('-l, --limit <number>', 'Number of companies to find (or set DEFAULT_SEARCH_LIMIT in .env)')
   .option('-r, --region <region>', 'Target region', '')
   .action(async (query: string, options) => {
     try {
       const { searchCompanyWebsites } = await import('./discovery/searchEngine.js');
       const { processCompanyOpportunity } = await import('./pipeline.js');
 
-      const limit = Math.min(30, Math.max(1, parseInt(options.limit, 10) || 5));
+      const limit = resolveLimit(options.limit, 5);
       const region = options.region || '';
 
       console.log(chalk.bold.magenta(`\n🏢 Searching software houses & company websites for: "${query}" [Limit: ${limit}]...`));
@@ -148,7 +166,7 @@ program
 program
   .command('search <query>')
   .description('Search startups, career pages, and ATS boards matching query')
-  .option('-l, --limit <number>', 'Number of targets to find', '5')
+  .option('-l, --limit <number>', 'Number of targets to find (or set DEFAULT_SEARCH_LIMIT in .env)')
   .option('-r, --region <region>', 'Target region or location (e.g. Worldwide, US, Europe, Pakistan, Remote)', 'Worldwide')
   .option('-e, --engine <engine>', 'Search engine to use (bing, ddg, google, all)', 'bing')
   .option('-b, --browser <browser>', 'Browser to use (chrome, edge, brave, camoufox, chromium)')
@@ -158,7 +176,7 @@ program
       if (options.browser) {
         process.env.BROWSER_TYPE = options.browser;
       }
-      const limit = Math.min(50, Math.max(1, parseInt(options.limit, 10) || 5));
+      const limit = resolveLimit(options.limit, 5);
       const region = options.region || 'Worldwide';
       const engine = options.engine || 'bing';
       console.log(chalk.bold.cyan(`\n🔍 Searching startups and job boards for: "${query}" [Engine: ${engine.toUpperCase()}] [Region: ${region}] (Limit: ${limit})...`));
@@ -204,7 +222,7 @@ program
 program
   .command('auto-hunt [preset]')
   .description('Run curated autonomous hunt. Presets: fullstack-ai, nextjs-architect, mcp-agentic, pakistan-tech')
-  .option('-l, --limit <number>', 'Targets per query', '3')
+  .option('-l, --limit <number>', 'Targets per query (or set DEFAULT_SEARCH_LIMIT in .env)')
   .option('-r, --region <region>', 'Target region (e.g. Worldwide, US, Europe, Remote, Pakistan)', 'Worldwide')
   .option('-e, --engine <engine>', 'Search engine to use (bing, ddg, google, all)', 'bing')
   .option('-b, --browser <browser>', 'Browser to use (chrome, edge, brave, camoufox, chromium)')
@@ -213,7 +231,7 @@ program
       process.env.BROWSER_TYPE = options.browser;
     }
     const queries = SEARCH_PRESETS[preset] || SEARCH_PRESETS['fullstack-ai'];
-    const limit = Math.min(20, Math.max(1, parseInt(options.limit, 10) || 3));
+    const limit = resolveLimit(options.limit, 3);
     const region = options.region || 'Worldwide';
     const engine = options.engine || 'bing';
 

@@ -248,10 +248,13 @@ export function getActiveProfile(): CandidateProfile {
     const jsonPath = path.resolve(process.cwd(), 'src', 'config', 'profile.json');
     if (fs.existsSync(jsonPath)) {
       const data = fs.readFileSync(jsonPath, 'utf-8');
-      return JSON.parse(data);
+      const parsed = JSON.parse(data);
+      if (parsed && parsed.name) {
+        return parsed;
+      }
     }
   } catch {
-    // ignore
+    // fallback to DEFAULT_PROFILE
   }
   return DEFAULT_PROFILE;
 }
