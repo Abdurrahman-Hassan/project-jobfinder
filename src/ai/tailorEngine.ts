@@ -3,6 +3,15 @@ import { CandidateProfile, JobListing, ATSAnalysis } from '../types/index.js';
 import { calculateATSScore } from './atsScorer.js';
 import { LLMOutputSchema, sanitizeHeaderString } from '../validation/schemas.js';
 
+function cleanCompanyBrandName(rawName?: string): string {
+  if (!rawName) return 'Company';
+  return rawName
+    .replace(/\s*[|\-—–].*$/, '')
+    .replace(/\s*\(.*?\)/g, '')
+    .replace(/\s+(Pvt\.|Ltd\.|Inc\.|LLC|GmbH|Co\.|Holdings)\b/gi, '')
+    .trim() || rawName;
+}
+
 export async function generateTailoredApplication(
   profile: CandidateProfile,
   job: JobListing
@@ -23,10 +32,11 @@ export async function generateTailoredApplication(
   return generateIntelligentTailoredProfile(profile, job);
 }
 
-function generateIntelligentTailoredProfile(
+export function generateIntelligentTailoredProfile(
   profile: CandidateProfile,
   job: JobListing
 ): ATSAnalysis {
+  const brandName = cleanCompanyBrandName(job.companyName);
   const { score, matchingKeywords, missingKeywords } = calculateATSScore(profile, job);
   const jdText = `${job.jobTitle || ''} ${job.descriptionText || ''}`.toLowerCase();
 
@@ -90,7 +100,7 @@ function generateIntelligentTailoredProfile(
   // 4. Greeting Resolution & Cold Email Pitch
   const recipientGreeting = job.contactName
     ? `Hi ${job.contactName.split(' ')[0]},`
-    : `Hi ${job.companyName} Team,`;
+    : `Hi ${brandName} Team,`;
 
   const topMatchingHighlights =
     matchingKeywords.slice(0, 3).join(', ') || 'Next.js, Node.js, and Cloud Infrastructure';
@@ -99,33 +109,30 @@ function generateIntelligentTailoredProfile(
     job.jobTitle.toLowerCase().includes('speculative') ||
     job.jobTitle.toLowerCase().includes('startup pitch') ||
     job.jobTitle.toLowerCase().includes('collaboration') ||
-    job.descriptionText.length < 150;
+    (job.descriptionText && job.descriptionText.length < 150);
 
-  let coldEmailSubject = sanitizeSubject(
-    `Software Engineer Application - ${job.jobTitle} - ${profile.name}`
-  );
-
+  let coldEmailSubject = '';
   let coldEmailBody = '';
 
   if (isSpeculative) {
     coldEmailSubject = sanitizeSubject(
-      `Exploring Engineering Collaboration with ${job.companyName} — ${profile.name} (Full-Stack & Platform Architect)`
+      `Full-Stack & Next.js Platform Engineer — ${profile.name}`
     );
 
     coldEmailBody = `${recipientGreeting}
 
-I've been closely following what you're building at ${job.companyName}.
+I've been following what you're building at ${brandName} and wanted to reach out directly.
 
-As a Full-Stack Engineer & Platform Architect specializing in ${topMatchingHighlights}, I wanted to reach out directly to explore if you're looking for high-leverage engineering support to accelerate feature delivery or scale your platform.
+As a Full-Stack Engineer & Platform Architect specializing in ${topMatchingHighlights}, I wanted to explore if your engineering team is looking for high-leverage support to accelerate feature delivery or scale upcoming platforms.
 
 A quick snapshot of relevant platforms I've architected:
-• Transcend (AI / MCP): Independently built an AI visual builder platform integrating Model Context Protocol (MCP) execution workflows and drag-and-drop canvas interactions.
+• Transcend (AI / MCP): Independently built an AI visual builder platform integrating Model Context Protocol (MCP) tool execution workflows and drag-and-drop canvas interactions.
 • Aga Khan University & Hospital: Spearheaded enterprise web modernization using Next.js (App Router) + Storyblok Headless CMS for high-traffic multi-site delivery.
 • BoxBuy (SaaS): Led distributed engineering to build a multi-tenant hospitality SaaS platform on GCP with Docker, cutting infrastructure costs by 35%.
 
-Whether you are actively expanding the team or exploring autonomous builders for upcoming platform initiatives, I would love to connect and share ideas on how I can add immediate velocity to ${job.companyName}.
+Whether you are actively expanding or looking for autonomous builders for upcoming platform initiatives, I would love to connect and share ideas on how I can add immediate velocity to ${brandName}.
 
-I have attached my resume for your review. Would you be open to a brief 10-minute introductory conversation this week?
+I have attached my tailored resume for your review. Would you be open to a brief 10-minute introductory conversation this week?
 
 Best regards,
 ${profile.name}
@@ -134,16 +141,20 @@ GitHub: ${profile.github || ''}
 LinkedIn: ${profile.linkedin || ''}
 Phone: ${profile.phone || ''}`;
   } else {
+    coldEmailSubject = sanitizeSubject(
+      `Application for ${job.jobTitle} — ${profile.name}`
+    );
+
     coldEmailBody = `${recipientGreeting}
 
-I came across ${job.companyName}'s opening for the ${job.jobTitle} position and wanted to reach out directly.
+I came across ${brandName}'s opening for the ${job.jobTitle} position and wanted to reach out directly.
 
 With 4 years of engineering experience architecting scalable platforms with ${topMatchingHighlights}, I have previously:
 • Spearheaded enterprise web modernization for Aga Khan University & Hospital (Next.js App Router + Headless CMS).
 • Led distributed engineering at Fair Trade to build multi-panel SaaS platforms, cutting cloud infrastructure costs by 35% on GCP.
 • Architected Transcend, an AI visual builder integrated with Model Context Protocol (MCP) workflows.
 
-I would love to bring this experience to ${job.companyName}. I have attached my tailored resume for your review. Would you be open to a brief 10-minute conversation this week?
+I would love to bring this experience to ${brandName}. I have attached my tailored resume for your review. Would you be open to a brief 10-minute conversation this week?
 
 Best regards,
 ${profile.name}
@@ -154,9 +165,9 @@ Phone: ${profile.phone || ''}`;
   }
 
   // 5. Tailored Cover Letter (using dynamic candidate info)
-  const coverLetter = `Dear Hiring Team at ${job.companyName},
+  const coverLetter = `Dear Hiring Team at ${brandName},
 
-I am writing to express my strong interest in the ${job.jobTitle} role at ${job.companyName}. With hands-on software engineering experience specializing in full-stack architecture, high-performance frontend systems (Next.js, React), and cloud microservices (Node.js, NestJS, GCP, Docker), I am eager to contribute to your engineering goals.
+I am writing to express my strong interest in the ${job.jobTitle} role at ${brandName}. With hands-on software engineering experience specializing in full-stack architecture, high-performance frontend systems (Next.js, React), and cloud microservices (Node.js, NestJS, GCP, Docker), I am eager to contribute to your engineering goals.
 
 Throughout my career, I have consistently focused on building scalable, reliable systems that deliver measurable business impact:
 - At Cloud Primero, I led the frontend architecture for the digital overhaul of Aga Khan University & Hospital, engineering high-traffic, SEO-optimized, and accessible platforms using Next.js App Router and Storyblok Headless CMS.
@@ -165,7 +176,7 @@ Throughout my career, I have consistently focused on building scalable, reliable
 
 Your requirements for ${job.jobTitle} align closely with my technical background in ${topMatchingHighlights}. I pride myself on rapid execution, clean modular architecture, and autonomous problem-solving.
 
-Thank you for your time and consideration. I welcome the opportunity to discuss how my skill set can support ${job.companyName}'s objectives.
+Thank you for your time and consideration. I welcome the opportunity to discuss how my skill set can support ${brandName}'s objectives.
 
 Sincerely,
 ${profile.name}
@@ -175,7 +186,7 @@ ${profile.email} | ${profile.phone}`;
     matchScore: score,
     matchingKeywords,
     missingKeywords,
-    recommendedFocus: [focusKeyword],
+    recommendedFocus: [matchingKeywords[0] || 'Full Stack'],
     tailoredSummary,
     tailoredSkills: skillsCopy,
     tailoredExperiences,

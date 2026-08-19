@@ -212,15 +212,30 @@ Respond with valid raw JSON only.`;
   return null;
 }
 
+function toTitleCase(str: string): string {
+  return str
+    .toLowerCase()
+    .split(' ')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
 function parseProfileRuleBased(rawText: string): CandidateProfile {
   const lines = rawText
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const name = lines[0] || DEFAULT_PROFILE.name;
+  const rawName = lines[0] || DEFAULT_PROFILE.name;
+  const name = rawName.toUpperCase() === rawName ? toTitleCase(rawName) : rawName;
+
   const emailMatch = rawText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  let phone = DEFAULT_PROFILE.phone;
   const phoneMatch = rawText.match(/(\+?\d[\d\s-]{8,}\d)/);
+  if (phoneMatch) {
+    phone = phoneMatch[0].startsWith('+') ? phoneMatch[0] : `+${phoneMatch[0]}`;
+  }
+
   const linkedinMatch = rawText.match(/https?:\/\/(www\.)?linkedin\.com\/in\/[a-zA-Z0-9_-]+/);
   const githubMatch = rawText.match(/https?:\/\/(www\.)?github\.com\/[a-zA-Z0-9_-]+/);
   const portfolioMatch = rawText.match(/https?:\/\/[a-zA-Z0-9.-]+\.(app|io|dev|netlify\.app|vercel\.app|me)/);
@@ -229,10 +244,10 @@ function parseProfileRuleBased(rawText: string): CandidateProfile {
     ...DEFAULT_PROFILE,
     name,
     email: emailMatch ? emailMatch[0] : DEFAULT_PROFILE.email,
-    phone: phoneMatch ? phoneMatch[0] : DEFAULT_PROFILE.phone,
+    phone,
     linkedin: linkedinMatch ? linkedinMatch[0] : DEFAULT_PROFILE.linkedin,
     github: githubMatch ? githubMatch[0] : DEFAULT_PROFILE.github,
     portfolio: portfolioMatch ? portfolioMatch[0] : DEFAULT_PROFILE.portfolio,
-    summary: lines.slice(1, 4).join(' ') || DEFAULT_PROFILE.summary
+    summary: DEFAULT_PROFILE.summary
   };
 }

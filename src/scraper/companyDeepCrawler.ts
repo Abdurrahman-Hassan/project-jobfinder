@@ -325,18 +325,28 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
   // 3. Adaptive Qualification: Active Role vs. Speculative Tech Pitch
   let allEmails = [...careerPageEmails, ...homepageEmails, ...contactPageEmails];
 
-  // Discard generic non-inbox patterns and unwanted system addresses
+  // Discard generic non-inbox patterns, template placeholders, and unwanted system addresses
   allEmails = allEmails.filter(
     (e) =>
       !e.includes('example.com') &&
       !e.includes('sentry.io') &&
       !e.includes('wixpress.com') &&
       !e.includes('domain.com') &&
-      !e.includes('legal@') &&
-      !e.includes('privacy@') &&
-      !e.includes('investor@') &&
-      !e.includes('press@') &&
-      !e.includes('abuse@')
+      !e.includes('company.com') &&
+      !e.includes('mycompany.com') &&
+      !e.startsWith('you@') &&
+      !e.startsWith('user@') &&
+      !e.startsWith('name@') &&
+      !e.startsWith('email@') &&
+      !e.startsWith('test@') &&
+      !e.startsWith('sample@') &&
+      !e.startsWith('noreply@') &&
+      !e.startsWith('no-reply@') &&
+      !e.startsWith('legal@') &&
+      !e.startsWith('privacy@') &&
+      !e.startsWith('investor@') &&
+      !e.startsWith('press@') &&
+      !e.startsWith('abuse@')
   );
 
   let targetRecipientEmail = '';

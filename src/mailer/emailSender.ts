@@ -3,15 +3,14 @@ import path from 'path';
 import nodemailer from 'nodemailer';
 import { ProcessedJobLead } from '../types/index.js';
 import { isValidEmail, sanitizeHeaderString } from '../validation/schemas.js';
+import { getActiveProfile } from '../config/profile.js';
 
 export async function verifySmtpConnection(): Promise<boolean> {
-  if (process.env.DRY_RUN !== 'false') return true;
-
   const gmailUser = process.env.GMAIL_USER || process.env.EMAIL_USER;
   const gmailPass = process.env.GMAIL_APP_PASSWORD || process.env.EMAIL_PASS;
 
   if (!gmailUser || !gmailPass) {
-    console.error('[SMTP Error] Missing GMAIL_USER or GMAIL_APP_PASSWORD in environment.');
+    console.error('[SMTP Error] Missing GMAIL_USER or GMAIL_APP_PASSWORD in .env.');
     return false;
   }
 
@@ -32,6 +31,77 @@ export async function verifySmtpConnection(): Promise<boolean> {
   }
 }
 
+/**
+ * Validates, cleans, and sanitizes recipient email.
+ * Replaces dummy/template addresses with verified domain fallback.
+ */
+export function sanitizeAndValidateRecipient(
+  rawEmail?: string,
+  domain?: string
+): { valid: boolean; email: string; reason?: string } {
+  const BLOCKED_PREFIXES = [
+    'you@',
+    'user@',
+    'name@',
+    'test@',
+    'sample@',
+    'email@',
+    'noreply@',
+    'no-reply@',
+    'admin@',
+    'webmaster@',
+    'abuse@'
+  ];
+
+  const BLOCKED_DOMAINS = [
+    'example.com',
+    'domain.com',
+    'company.com',
+    'mycompany.com',
+    'sentry.io',
+    'wixpress.com',
+    'arbeitnow.com',
+    'remotive.com',
+    'jobicy.com',
+    'greenhouse.io',
+    'lever.co',
+    'ashbyhq.com',
+    'workable.com'
+  ];
+
+  let candidate = (rawEmail || '').trim().toLowerCase().replace(/[\r\n\t]/g, '');
+
+  const isBlocked =
+    !candidate ||
+    BLOCKED_PREFIXES.some((p) => candidate.startsWith(p)) ||
+    BLOCKED_DOMAINS.some((d) => candidate.endsWith(`@${d}`) || candidate === d);
+
+  if (isBlocked) {
+    if (domain && !BLOCKED_DOMAINS.includes(domain)) {
+      candidate = `careers@${domain.replace(/^www\./, '')}`;
+    } else {
+      return { valid: false, email: candidate, reason: `Blocked or dummy email: "${rawEmail}"` };
+    }
+  }
+
+  if (!isValidEmail(candidate)) {
+    return { valid: false, email: candidate, reason: `Invalid email format: "${candidate}"` };
+  }
+
+  return { valid: true, email: candidate };
+}
+
+/**
+ * Clean subject and body from template artifacts & CRLF header injection.
+ */
+export function sanitizeContent(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\[(?:Name|Team|Company|Your Name|Recipient)\]/gi, '')
+    .replace(/\b(?:undefined|NaN|null)\b/g, '')
+    .trim();
+}
+
 export async function sendOrDraftEmail(lead: ProcessedJobLead): Promise<{
   success: boolean;
   mode: 'SENT' | 'DRAFTED';
@@ -39,28 +109,33 @@ export async function sendOrDraftEmail(lead: ProcessedJobLead): Promise<{
   error?: string;
 }> {
   const isDryRun = process.env.DRY_RUN !== 'false';
-  const gmailUser = process.env.GMAIL_USER || process.env.EMAIL_USER || 'abdurfreelance@gmail.com';
+  const profile = getActiveProfile();
+  const gmailUser = process.env.GMAIL_USER || process.env.EMAIL_USER || profile.email;
   const gmailPass = process.env.GMAIL_APP_PASSWORD || process.env.EMAIL_PASS;
 
-  const rawRecipient =
-    lead.job.contactEmail || `careers@${lead.job.companyDomain || 'company.com'}`;
-  
-  // Header Injection Defense & Email Validation
-  const recipient = sanitizeHeaderString(rawRecipient);
-  const subject = sanitizeHeaderString(
-    lead.analysis.coldEmailSubject || `Application for ${lead.job.jobTitle}`
+  // 1. Recipient Sanitization & Verification
+  const { valid, email: recipient, reason } = sanitizeAndValidateRecipient(
+    lead.job.contactEmail,
+    lead.job.companyDomain
   );
-  const body = lead.analysis.coldEmailBody;
 
-  if (!isValidEmail(recipient)) {
+  if (!valid) {
     return {
       success: false,
       mode: 'DRAFTED',
-      error: `Invalid recipient email address format: "${recipient}"`
+      error: reason || 'Invalid recipient email'
     };
   }
 
-  // 1. Dry Run / Draft Mode
+  // Update lead with sanitized recipient
+  lead.job.contactEmail = recipient;
+
+  // 2. Subject and Body Sanitization
+  const rawSubject = lead.analysis.coldEmailSubject || `Application for ${lead.job.jobTitle} — ${profile.name}`;
+  const subject = sanitizeHeaderString(sanitizeContent(rawSubject));
+  const body = sanitizeContent(lead.analysis.coldEmailBody);
+
+  // 3. Dry Run / Draft Mode
   if (isDryRun || !gmailPass) {
     const draftsDir = path.resolve(process.cwd(), 'output', 'drafts');
     await fs.mkdir(draftsDir, { recursive: true });
@@ -96,7 +171,7 @@ ${lead.analysis.coverLetter}
     };
   }
 
-  // 2. Live Sending Mode via Nodemailer Gmail
+  // 4. Live Sending Mode via Nodemailer Gmail
   const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -108,11 +183,13 @@ ${lead.analysis.coverLetter}
   const attachments: any[] = [];
   if (lead.resumePdfPath) {
     try {
-      await fs.access(lead.resumePdfPath);
-      attachments.push({
-        filename: path.basename(lead.resumePdfPath),
-        path: lead.resumePdfPath
-      });
+      const stats = await fs.stat(lead.resumePdfPath);
+      if (stats.size > 500) {
+        attachments.push({
+          filename: `${profile.name.replace(/\s+/g, '_')}_Resume.pdf`,
+          path: lead.resumePdfPath
+        });
+      }
     } catch {
       console.warn(`[Mailer Warning] Resume PDF file not found at ${lead.resumePdfPath}, sending without attachment.`);
     }
@@ -120,7 +197,8 @@ ${lead.analysis.coverLetter}
 
   try {
     await transporter.sendMail({
-      from: `"${sanitizeHeaderString(lead.analysis.coldEmailSubject.split('-').pop()?.trim() || 'Candidate')}" <${gmailUser}>`,
+      from: `"${profile.name}" <${gmailUser}>`,
+      replyTo: profile.email,
       to: recipient,
       subject,
       text: body,

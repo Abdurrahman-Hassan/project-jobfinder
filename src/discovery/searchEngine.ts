@@ -650,6 +650,7 @@ export async function searchDuckDuckGoLive(
   return results;
 }
 
+
 // 4. Remote Tech Job Feed APIs (Remotive, Arbeitnow with location filtering)
 export async function searchRemoteFeeds(
   query: string,

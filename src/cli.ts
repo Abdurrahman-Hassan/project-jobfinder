@@ -145,6 +145,48 @@ program
     }
   });
 
+// 2e. Google Stealth Company Discovery & Deep-Crawl
+program
+  .command('google-hunt <query>')
+  .description('Search Google for software companies/startups, deep-crawl pages, and apply')
+  .option('-l, --limit <number>', 'Number of companies to find')
+  .option('-r, --region <region>', 'Target region (e.g. Remote, US, Europe, Worldwide)')
+  .action(async (query: string, options) => {
+    try {
+      const { searchGoogleLive } = await import('./discovery/searchEngine.js');
+      const { processCompanyOpportunity } = await import('./pipeline.js');
+
+      const limit = resolveLimit(options.limit, 10);
+      const region = resolveRegion(options.region, 'Worldwide');
+
+      console.log(chalk.bold.magenta(`\n🌐 Searching Google Live for: "${query}" [Region: ${region}] [Limit: ${limit}]...`));
+      const targets = await searchGoogleLive(query, limit, region);
+
+      if (targets.length === 0) {
+        console.log(chalk.yellow('No matching Google results found.'));
+        return;
+      }
+
+      console.log(chalk.green(`\nFound ${targets.length} Google target(s):`));
+      targets.forEach((t, i) => console.log(`  ${i + 1}. ${chalk.bold(t.title)} (${chalk.blue(t.url)})`));
+
+      console.log(chalk.bold.green(`\n🚀 Deep-crawling companies and tailoring applications...`));
+      let processed = 0;
+      for (const t of targets) {
+        try {
+          const lead = await processCompanyOpportunity(t.url);
+          if (lead) processed++;
+        } catch (err: any) {
+          console.error(chalk.red(`Failed processing ${t.url}: ${err.message}`));
+        }
+      }
+
+      console.log(chalk.bold.cyan(`\n✨ Google hunt complete: ${processed} applications drafted to output/resumes/ and output/drafts/`));
+    } catch (err: any) {
+      console.error(chalk.red(`Google hunt error: ${err.message}`));
+    }
+  });
+
 // 3. Process Direct JD Command
 program
   .command('process-jd <fileOrText>')
@@ -436,6 +478,73 @@ program
       }
     }
     console.log(chalk.bold.green('\n🎉 Send queue completed! Check "npm run stats".'));
+  });
+
+// 9. Send Test Email to Self (Visual Verification)
+program
+  .command('test-email [targetEmail]')
+  .description('Send a test application email with tailored PDF resume attached to your own inbox')
+  .action(async (targetEmail?: string) => {
+    process.env.DRY_RUN = 'false';
+    const { getActiveProfile } = await import('./config/profile.js');
+    const { sendOrDraftEmail, verifySmtpConnection } = await import('./mailer/emailSender.js');
+    const { getStoredLeads } = await import('./tracker/db.js');
+
+    const profile = getActiveProfile();
+    const recipient = targetEmail || process.env.GMAIL_USER || profile.email;
+
+    console.log(chalk.bold.cyan(`\n🧪 Preparing Live Test Email to: ${chalk.bold(recipient)}...`));
+
+    const isSmtpValid = await verifySmtpConnection();
+    if (!isSmtpValid) {
+      console.log(chalk.bold.red('❌ SMTP Authentication failed. Check GMAIL_APP_PASSWORD in .env.'));
+      return;
+    }
+
+    const leads = await getStoredLeads();
+    const sampleLead = leads[0] || {
+      id: 'test-lead',
+      job: {
+        url: 'https://example.com/careers',
+        companyName: 'Acme AI Labs',
+        companyDomain: 'example.com',
+        jobTitle: 'Full-Stack Software Engineer (Test)',
+        descriptionText: 'Next.js, TypeScript, Node.js, Cloud Architecture',
+        requirements: ['Next.js', 'TypeScript', 'Node.js'],
+        contactEmail: recipient
+      },
+      analysis: {
+        matchScore: 9.8,
+        matchingKeywords: ['TypeScript', 'Next.js', 'Node.js', 'PostgreSQL'],
+        missingKeywords: [],
+        recommendedFocus: ['Next.js'],
+        tailoredSummary: profile.summary,
+        tailoredSkills: profile.skillCategories,
+        tailoredExperiences: profile.experiences,
+        coldEmailSubject: `Test Application: Full-Stack Software Engineer — ${profile.name}`,
+        coldEmailBody: `Hi Team,\n\nThis is a live test email from JobFinder Pro demonstrating a tailored application with PDF resume attached.\n\nBest regards,\n${profile.name}\nPhone: ${profile.phone}`,
+        coverLetter: `Test cover letter for ${profile.name}.`
+      },
+      resumePdfPath: path.resolve(process.cwd(), 'output', 'resumes', 'ABDURRAHMAN_HASSAN_Wortel.pdf'),
+      status: 'TAILORED',
+      createdAt: new Date().toISOString()
+    };
+
+    // Clone and route to test recipient
+    const testLead = JSON.parse(JSON.stringify(sampleLead));
+    testLead.job.contactEmail = recipient;
+    testLead.analysis.coldEmailSubject = `[TEST APPLICATION] Full-Stack Software Engineer — ${profile.name}`;
+
+    console.log(chalk.gray(`  • Attaching PDF resume: ${testLead.resumePdfPath}`));
+    console.log(chalk.gray(`  • Dispatching via Gmail SMTP (${process.env.GMAIL_USER})...`));
+
+    const res = await sendOrDraftEmail(testLead);
+    if (res.mode === 'SENT') {
+      console.log(chalk.bold.green(`\n🎉 Test email successfully sent to ${recipient}!`));
+      console.log(chalk.cyan(`👉 Open your Gmail inbox (${recipient}) to inspect the email, subject line, and PDF attachment!`));
+    } else {
+      console.log(chalk.bold.red(`\n❌ Failed sending test email: ${res.error}`));
+    }
   });
 
 program.parse(process.argv);

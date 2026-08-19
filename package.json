@@ -19,7 +19,9 @@
     "browsers": "tsx src/cli.ts browsers",
     "pitch": "tsx src/cli.ts pitch",
     "crawl": "tsx src/cli.ts crawl",
-    "company-hunt": "tsx src/cli.ts company-hunt"
+    "company-hunt": "tsx src/cli.ts company-hunt",
+    "google-hunt": "tsx src/cli.ts google-hunt",
+    "test-email": "tsx src/cli.ts test-email"
   },
   "keywords": [
     "job-automation",
