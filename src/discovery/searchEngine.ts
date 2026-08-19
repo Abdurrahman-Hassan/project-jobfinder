@@ -1,6 +1,9 @@
-import puppeteer from 'puppeteer';
-import fs from 'fs/promises';
 import axios from 'axios';
+import chalk from 'chalk';
+import { Browser, Page } from 'puppeteer';
+import { launchManagedBrowser } from '../utils/browserManager.js';
+import { getRandomUserAgent } from '../utils/userAgents.js';
+import { extractEmailsFromHtml } from '../enrichment/emailExtractor.js';
 
 export interface SearchResultTarget {
   title: string;
@@ -8,227 +11,850 @@ export interface SearchResultTarget {
   snippet: string;
   domain: string;
   contactEmail?: string;
+  source?: string;
+  location?: string;
 }
 
-// Helper to detect Chrome/Edge on system
-async function getBrowserExecutable(): Promise<string | undefined> {
-  const possiblePaths = [
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium-browser',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+// Job aggregator directory domains, banks, dictionaries, and non-job sites to strictly ignore
+const IGNORED_DOMAINS = [
+  'linkedin.com',
+  'indeed.com',
+  'glassdoor.com',
+  'ziprecruiter.com',
+  'monster.com',
+  'simplyhired.com',
+  'careerbuilder.com',
+  'rozee.pk',
+  'upwork.com',
+  'fiverr.com',
+  'freelancer.com',
+  'turing.com',
+  'bebee.com',
+  'jooble.org',
+  'talent.com',
+  'salary.com',
+  'wikipedia.org',
+  'youtube.com',
+  'facebook.com',
+  'twitter.com',
+  'instagram.com',
+  'reddit.com',
+  'medium.com',
+  'quora.com',
+  'dictionary.cambridge.org',
+  'merriam-webster.com',
+  'collinsdictionary.com',
+  'thefreedictionary.com',
+  'wiktionary.org',
+  'lcl.fr',
+  'yettel.hu'
+];
+
+export function isStaffingOrAgencyText(text: string): boolean {
+  const agencyRegexes = [
+    /\b(staffing|recruiting|recruitment)\s+(agency|firm|partner|service|solutions|group)\b/i,
+    /\bon\s+behalf\s+of\s+(our\s+)?client\b/i,
+    /\bour\s+client\s+is\s+(looking|hiring|seeking|a)\b/i,
+    /\btalent\s+(network|marketplace|solutions|partner|agency|pool|hub)\b/i,
+    /\boutsourcing\s+(firm|company|service|agency)\b/i,
+    /\bplacement\s+agency\b/i,
+    /\bheadhunting\b/i,
+    /\bcontingent\s+workforce\b/i,
+    /\bclient\s+placement\b/i
   ];
-  for (const p of possiblePaths) {
-    try {
-      await fs.access(p);
-      return p;
-    } catch {
-      // ignore
-    }
-  }
-  return undefined;
+
+  const knownAgencies = [
+    'pavago',
+    'smart working solutions',
+    'cybercoders',
+    'robert half',
+    'teksystems',
+    'kforce',
+    'randstad',
+    'adecco',
+    'hays',
+    'michael page',
+    'motion recruitment',
+    'apex systems',
+    'insight global',
+    'turing',
+    'andela',
+    'crossover',
+    'bairesdev'
+  ];
+
+  const lower = text.toLowerCase();
+  return agencyRegexes.some((r) => r.test(lower)) || knownAgencies.some((a) => lower.includes(a));
 }
 
-// 1. Real Headless Browser Google Search Engine
-export async function searchGoogleViaBrowser(
+function isLegitimateJobResult(title: string, snippet: string, url: string): boolean {
+  const text = `${title} ${snippet} ${url}`.toLowerCase();
+
+  // Reject staffing & recruitment agencies
+  if (isStaffingOrAgencyText(text)) {
+    return false;
+  }
+
+  const hasTechKeyword =
+    text.includes('engineer') ||
+    text.includes('developer') ||
+    text.includes('full stack') ||
+    text.includes('frontend') ||
+    text.includes('backend') ||
+    text.includes('software') ||
+    text.includes('next.js') ||
+    text.includes('react') ||
+    text.includes('architect') ||
+    text.includes('tech lead');
+
+  const hasJobContext =
+    text.includes('job') ||
+    text.includes('career') ||
+    text.includes('hiring') ||
+    text.includes('remote') ||
+    text.includes('apply') ||
+    url.includes('/job/') ||
+    url.includes('/jobs/') ||
+    url.includes('/j/') ||
+    url.includes('/careers/') ||
+    url.includes('lever.co') ||
+    url.includes('greenhouse.io') ||
+    url.includes('ashbyhq.com') ||
+    url.includes('workable.com');
+
+  return hasTechKeyword && hasJobContext;
+}
+
+export function matchesRequestedRegion(jobLoc: string, requestedRegion?: string): boolean {
+  if (
+    !requestedRegion ||
+    requestedRegion.toLowerCase() === 'any' ||
+    requestedRegion.toLowerCase() === 'all' ||
+    requestedRegion.toLowerCase() === 'worldwide' ||
+    requestedRegion.toLowerCase() === 'remote'
+  ) {
+    return true;
+  }
+  const req = requestedRegion.toLowerCase().trim();
+  const loc = (jobLoc || '').toLowerCase();
+
+  // If user requested Pakistan
+  if (req.includes('pak')) {
+    if (
+      loc.includes('pakistan') ||
+      loc.includes('karachi') ||
+      loc.includes('lahore') ||
+      loc.includes('islamabad') ||
+      loc.includes('rawalpindi')
+    ) {
+      return true;
+    }
+    // Accept global / worldwide remote, but reject explicitly geo-locked foreign roles
+    if (
+      (loc.includes('worldwide') || loc.includes('anywhere') || loc.includes('global')) &&
+      !loc.includes('germany') &&
+      !loc.includes('stuttgart') &&
+      !loc.includes('berlin') &&
+      !loc.includes('uk only') &&
+      !loc.includes('us only')
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  // If user requested US
+  if (req === 'us' || req.includes('united states') || req.includes('america')) {
+    return loc.includes('us') || loc.includes('united states') || loc.includes('worldwide') || loc.includes('anywhere') || loc.includes('global');
+  }
+
+  // If user requested Europe / UK
+  if (req.includes('europe') || req.includes('eu') || req === 'uk') {
+    return loc.includes('europe') || loc.includes('uk') || loc.includes('germany') || loc.includes('worldwide') || loc.includes('anywhere');
+  }
+
+  return loc.includes(req) || loc.includes('worldwide') || loc.includes('anywhere') || loc.includes('global');
+}
+
+function buildRegionFilterString(region?: string): string {
+  if (!region || region.toLowerCase() === 'any' || region.toLowerCase() === 'all') {
+    return 'remote';
+  }
+  const clean = region.trim().toLowerCase();
+  if (clean.includes('pak')) {
+    return '("Pakistan" OR "Lahore" OR "Karachi" OR "Islamabad" OR "Remote")';
+  }
+  if (clean === 'worldwide' || clean === 'global') {
+    return '("Worldwide" OR "Anywhere" OR "Global" OR remote)';
+  }
+  return `("${region.trim()}" OR remote)`;
+}
+
+export async function applyStealthEvasions(page: Page) {
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    (window as any).chrome = {
+      app: { isInstalled: false, InstallState: { DISABLED: 'disabled' }, RunningState: { CANNOT_RUN: 'cannot_run' } },
+      runtime: {
+        OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
+        PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd' },
+        PlatformArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64' }
+      }
+    };
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+  });
+}
+
+function extractGoogleResultsFromDom(page: Page, maxResults: number) {
+  return page.evaluate((limit: number) => {
+    const items: { title: string; url: string; snippet: string }[] = [];
+    const allAnchors = Array.from(document.querySelectorAll('a'));
+
+    allAnchors.forEach((a) => {
+      if (items.length >= limit) return;
+      const h3 = a.querySelector('h3') || (a.parentElement?.querySelector('h3') as HTMLElement);
+      const url = a.href;
+
+      if (h3 && url && url.startsWith('http')) {
+        const title = h3.innerText.trim();
+        if (
+          title &&
+          !url.includes('google.com/search') &&
+          !url.includes('google.com/sorry') &&
+          !url.includes('support.google.com') &&
+          !url.includes('accounts.google.com') &&
+          !url.includes('maps.google.com')
+        ) {
+          const container = a.closest('div.g, div[data-hveid], #rso > div') || a.parentElement;
+          const snippetEl = container?.querySelector('div.VwiC3b, span.aCOpRe, div[style*="-webkit-line-clamp"]');
+          const snippet = snippetEl ? (snippetEl as HTMLElement).innerText.trim() : '';
+
+          items.push({
+            title,
+            url,
+            snippet
+          });
+        }
+      }
+    });
+
+    return items;
+  }, maxResults);
+}
+
+// 1. Google Live Search (Stealth Headless + Region Filter + Interactive CAPTCHA Solver)
+export async function searchGoogleLive(
   query: string,
-  limit: number = 10
+  limit: number = 10,
+  region?: string,
+  maxWaitTimeMs: number = 90000
 ): Promise<SearchResultTarget[]> {
   const results: SearchResultTarget[] = [];
-  const visitedDomains = new Set<string>();
+  const seenUrls = new Set<string>();
 
-  const blacklistedDomains = [
-    'google.com',
-    'youtube.com',
-    'facebook.com',
-    'twitter.com',
-    'x.com',
-    'instagram.com',
-    'pinterest.com',
-    'wikipedia.org',
-    'reddit.com',
-    'quora.com'
-  ];
+  const cleanKeyword = query.replace(/["']/g, '').trim();
+  const regionClause = buildRegionFilterString(region);
+  const googleSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(
+    `site:ashbyhq.com OR site:lever.co OR site:greenhouse.io OR site:workable.com "${cleanKeyword}" ${regionClause} -staffing -recruiting -recruitment -agency -"our client"`
+  )}&hl=en&num=${Math.max(30, limit * 4)}`;
 
-  const executablePath = await getBrowserExecutable();
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-      '--window-size=1280,800'
-    ]
-  });
+  let headlessBrowser: Browser | null = null;
+  let isCaptchaDetected = false;
 
   try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    headlessBrowser = await launchManagedBrowser({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1366,768'
+      ]
+    });
+
+    const page = await headlessBrowser.newPage();
+    await page.setViewport({ width: 1366, height: 768 });
+    await page.setUserAgent(getRandomUserAgent());
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+      'sec-fetch-dest': 'document',
+      'sec-fetch-mode': 'navigate',
+      'sec-fetch-site': 'none',
+      'sec-fetch-user': '?1',
+      'upgrade-insecure-requests': '1'
+    });
+    await applyStealthEvasions(page);
+
+    await page.goto(googleSearchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+    const consentButton = await page.$(
+      'button#L2AGLb, button[aria-label="Accept all"], div[role="dialog"] button'
+    );
+    if (consentButton) {
+      await consentButton.click().catch(() => {});
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+    }
+
+    const currentUrl = page.url();
+    isCaptchaDetected =
+      currentUrl.includes('/sorry/') ||
+      (await page.$('#captcha-form, iframe[src*="recaptcha"], div.g-recaptcha')) !== null;
+
+    if (!isCaptchaDetected) {
+      const rawResults = await extractGoogleResultsFromDom(page, limit * 3);
+      for (const r of rawResults) {
+        if (results.length >= limit) break;
+        try {
+          let cleanUrl = r.url;
+          if (cleanUrl.endsWith('/apply/')) cleanUrl = cleanUrl.slice(0, -6);
+          else if (cleanUrl.endsWith('/apply')) cleanUrl = cleanUrl.slice(0, -5);
+          cleanUrl = cleanUrl.replace(/[?&]lever-source=[^&]+/, '');
+
+          const domain = new URL(cleanUrl).hostname.replace(/^www\./, '');
+          if (
+            !IGNORED_DOMAINS.some((d) => domain.includes(d)) &&
+            !seenUrls.has(cleanUrl) &&
+            isLegitimateJobResult(r.title, r.snippet, cleanUrl)
+          ) {
+            seenUrls.add(cleanUrl);
+            results.push({
+              title: r.title,
+              url: cleanUrl,
+              snippet: r.snippet,
+              domain,
+              location: region || 'Remote',
+              source: 'Google Search (Direct ATS)'
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (results.length > 0) {
+        return results;
+      }
+    }
+  } catch {
+    // proceed to interactive window if CAPTCHA was flagged
+  } finally {
+    if (headlessBrowser) {
+      await headlessBrowser.close().catch(() => {});
+    }
+  }
+
+  // Interactive Visible Window (Headed Fallback) for Human CAPTCHA Solving
+  if (isCaptchaDetected) {
+    console.log(chalk.bold.yellow('\n⚠️  Google bot verification challenge detected!'));
+    console.log(chalk.bold.cyan('👉 Opening a Chrome browser window on your screen to solve the CAPTCHA...'));
+    console.log(
+      chalk.gray(
+        `⏳ Please solve the puzzle/checkbox in Chrome. The script will automatically resume once solved (waiting up to ${maxWaitTimeMs / 1000}s)...\n`
+      )
     );
 
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=20`;
+    let visibleBrowser: Browser | null = null;
+    try {
+      visibleBrowser = await launchManagedBrowser({
+        headless: false,
+        defaultViewport: null,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-blink-features=AutomationControlled',
+          '--start-maximized'
+        ]
+      });
+
+      const page = (await visibleBrowser.pages())[0] || (await visibleBrowser.newPage());
+      await page.setUserAgent(getRandomUserAgent());
+      await applyStealthEvasions(page);
+
+      await page.goto(googleSearchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+      // Poll until the CAPTCHA /sorry/ screen disappears and REAL Google search result links render
+      const startTime = Date.now();
+      let solved = false;
+
+      while (Date.now() - startTime < maxWaitTimeMs) {
+        try {
+          const currentUrl = page.url();
+          const hasSorry = currentUrl.includes('/sorry/');
+          const isSearchUrl = currentUrl.includes('google.com/search') || currentUrl.includes('google.');
+
+          if (!hasSorry && isSearchUrl) {
+            // Count actual non-Google third-party search result links
+            const realResultCount = await page
+              .evaluate(() => {
+                const allLinks = Array.from(document.querySelectorAll('a'));
+                const realLinks = allLinks.filter((a) => {
+                  const h3 =
+                    a.querySelector('h3') || (a.parentElement?.querySelector('h3') as HTMLElement);
+                  const href = a.href || '';
+                  return (
+                    h3 &&
+                    h3.innerText.trim().length > 3 &&
+                    href.startsWith('http') &&
+                    !href.includes('google.com') &&
+                    !href.includes('/sorry/')
+                  );
+                });
+                return realLinks.length;
+              })
+              .catch(() => 0);
+
+            if (realResultCount >= 1) {
+              solved = true;
+              break;
+            }
+          }
+        } catch {
+          // Page is currently in the middle of a redirect/navigation, retry on next tick
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      if (solved) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        console.log(chalk.bold.green('✓ Verification solved! Extracting direct job listings...'));
+
+        let rawResults: any[] = [];
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            rawResults = await extractGoogleResultsFromDom(page, limit * 3);
+            if (rawResults.length > 0) break;
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+        }
+
+        for (const r of rawResults) {
+          if (results.length >= limit) break;
+          try {
+            let cleanUrl = r.url;
+            if (cleanUrl.endsWith('/apply/')) cleanUrl = cleanUrl.slice(0, -6);
+            else if (cleanUrl.endsWith('/apply')) cleanUrl = cleanUrl.slice(0, -5);
+            cleanUrl = cleanUrl.replace(/[?&]lever-source=[^&]+/, '');
+
+            const domain = new URL(cleanUrl).hostname.replace(/^www\./, '');
+            if (
+              !IGNORED_DOMAINS.some((d) => domain.includes(d)) &&
+              !seenUrls.has(cleanUrl) &&
+              isLegitimateJobResult(r.title, r.snippet, cleanUrl)
+            ) {
+              seenUrls.add(cleanUrl);
+              results.push({
+                title: r.title,
+                url: cleanUrl,
+                snippet: r.snippet,
+                domain,
+                location: region || 'Remote',
+                source: 'Google Search (Direct ATS)'
+              });
+            }
+          } catch {
+            // ignore
+          }
+        }
+      } else {
+        console.log(chalk.yellow('⏱️ Verification timed out. Falling back to backup feeds.'));
+      }
+    } catch (err: any) {
+      console.warn(chalk.yellow(`[Interactive Google Search Warning] ${err.message}`));
+    } finally {
+      if (visibleBrowser) {
+        await visibleBrowser.close().catch(() => {});
+      }
+    }
+  }
+
+  return results;
+}
+
+// 2. Bing Live Web Search (Clean keywords with Region & strict job validation)
+export async function searchBingLive(
+  query: string,
+  limit: number = 10,
+  region?: string
+): Promise<SearchResultTarget[]> {
+  const results: SearchResultTarget[] = [];
+  const seenUrls = new Set<string>();
+  const cleanKeyword = query.replace(/["']/g, '').trim();
+  const regionTag = region && region.toLowerCase() !== 'any' ? region : 'remote';
+
+  let browser;
+  try {
+    browser = await launchManagedBrowser();
+    const page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.setUserAgent(getRandomUserAgent());
+
+    const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(
+      `"${cleanKeyword}" ${regionTag} jobs`
+    )}&ensearch=1&count=${limit + 10}`;
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-    // Extract search result links from Google DOM
-    const rawResults = await page.evaluate(() => {
-      const items: { title: string; url: string; snippet: string }[] = [];
-      const blocks = document.querySelectorAll('div.g, div[data-hveid]');
-
-      blocks.forEach((b) => {
-        const linkEl = b.querySelector('a') as HTMLAnchorElement;
-        const titleEl = b.querySelector('h3');
-        const snippetEl = b.querySelector('div[style*="-webkit-line-clamp"], div.VwiC3b');
-
-        if (linkEl && titleEl && linkEl.href && linkEl.href.startsWith('http')) {
+    const raw = await page.evaluate(() => {
+      const items: any[] = [];
+      document.querySelectorAll('li.b_algo').forEach((el) => {
+        const a = el.querySelector('h2 a') as HTMLAnchorElement;
+        const snippet = el.querySelector('.b_caption p, .b_algoSlug') as HTMLElement;
+        if (a && a.href) {
           items.push({
-            title: titleEl.textContent?.trim() || '',
-            url: linkEl.href,
-            snippet: snippetEl?.textContent?.trim() || ''
+            title: a.innerText.trim(),
+            url: a.href,
+            snippet: snippet ? snippet.innerText.trim() : ''
           });
         }
       });
       return items;
     });
 
-    for (const item of rawResults) {
+    for (const r of raw) {
       if (results.length >= limit) break;
-      if (!item.url) continue;
 
-      try {
-        const parsed = new URL(item.url);
-        const domain = parsed.hostname.replace(/^www\./, '').toLowerCase();
-
-        const isBlacklisted = blacklistedDomains.some((b) => domain.includes(b));
-        if (!isBlacklisted && !visitedDomains.has(domain)) {
-          visitedDomains.add(domain);
-          results.push({
-            title: item.title || domain,
-            url: item.url,
-            snippet: item.snippet,
-            domain
-          });
+      let cleanUrl = r.url;
+      if (cleanUrl.includes('bing.com/ck/a?')) {
+        const match = cleanUrl.match(/[?&]u=([^&]+)/);
+        if (match && match[1]) {
+          const rawBase64 = match[1];
+          const base64Str = rawBase64.startsWith('a1') ? rawBase64.slice(2) : rawBase64;
+          try {
+            cleanUrl = Buffer.from(base64Str, 'base64').toString('utf-8');
+          } catch {
+            // fallback
+          }
         }
-      } catch {
-        // ignore
+      }
+
+      if (cleanUrl.startsWith('http') && !cleanUrl.includes('bing.com')) {
+        try {
+          const domain = new URL(cleanUrl).hostname.replace(/^www\./, '');
+          if (
+            !IGNORED_DOMAINS.some((d) => domain.includes(d)) &&
+            !seenUrls.has(cleanUrl) &&
+            isLegitimateJobResult(r.title, r.snippet, cleanUrl)
+          ) {
+            seenUrls.add(cleanUrl);
+            results.push({
+              title: r.title,
+              url: cleanUrl,
+              snippet: r.snippet,
+              domain,
+              location: region || 'Remote',
+              source: 'Bing Search'
+            });
+          }
+        } catch {
+          // ignore
+        }
       }
     }
   } catch (err: any) {
-    console.warn('[SearchEngine] Google browser search warning:', err.message);
+    console.warn(`[Bing Search Warning] Search warning: ${err.message}`);
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 
   return results;
 }
 
-// 2. Hacker News "Who is Hiring" Startup Search (Fast direct API fallback)
-export async function searchHNHiringStartups(
-  keyword: string,
-  limit: number = 5
+// 3. Remote Tech Job Feed APIs (Remotive, Arbeitnow with location filtering)
+export async function searchRemoteFeeds(
+  query: string,
+  limit: number = 5,
+  region?: string
 ): Promise<SearchResultTarget[]> {
   const results: SearchResultTarget[] = [];
+  const seenUrls = new Set<string>();
+  const cleanKeyword = query.toLowerCase();
+  const regionLower = (region || '').toLowerCase();
+
+  // Remotive API
   try {
-    const hnRes = await axios.get(
-      `https://hn.algolia.com/api/v1/search_by_date?tags=story,author_whoishiring&query=Ask%20HN:%20Who%20is%20hiring&hitsPerPage=1`,
-      { timeout: 6000 }
+    const searchTerms = cleanKeyword.includes('next')
+      ? 'next.js'
+      : cleanKeyword.includes('full stack')
+        ? 'full stack'
+        : 'software';
+
+    const res = await axios.get(
+      `https://remotive.com/api/remote-jobs?search=${encodeURIComponent(searchTerms)}`,
+      {
+        timeout: 6000,
+        maxContentLength: 5 * 1024 * 1024,
+        maxBodyLength: 5 * 1024 * 1024,
+        headers: { 'User-Agent': getRandomUserAgent() }
+      }
     );
+    const jobs = res.data?.jobs || [];
 
-    const latestStory = hnRes.data?.hits?.[0];
-    if (!latestStory) return [];
-
-    const storyId = latestStory.objectID;
-    const cleanKw = keyword.split(' ')[0] || 'remote'; // search primary keyword
-
-    const commentsRes = await axios.get(
-      `https://hn.algolia.com/api/v1/search?tags=comment,story_${storyId}&query=${encodeURIComponent(
-        cleanKw
-      )}&hitsPerPage=${limit * 2}`,
-      { timeout: 6000 }
-    );
-
-    const hits = commentsRes.data?.hits || [];
-
-    for (const hit of hits) {
+    for (const j of jobs) {
       if (results.length >= limit) break;
-      const text = hit.comment_text || '';
-      const cleanText = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+      if (j.url && !seenUrls.has(j.url)) {
+        const text = `${j.title} ${j.category}`.toLowerCase();
+        const jobLoc = j.candidate_required_location || 'Remote';
 
-      const urlMatch = text.match(/href="([^"]+)"/i) || text.match(/(https?:\/\/[^\s<]+)/i);
-      const emailMatch = cleanText.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/i);
+        const matchesRegion = matchesRequestedRegion(jobLoc, region);
 
-      let targetUrl = urlMatch ? urlMatch[1] : '';
-      if (targetUrl) {
-        targetUrl = targetUrl
-          .replace(/&#x2F;/g, '/')
-          .replace(/&amp;/g, '&')
-          .replace(/&quot;/g, '')
-          .replace(/&#x27;/g, "'");
-      }
-
-      if (!targetUrl && emailMatch) {
-        const domain = emailMatch[1].split('@')[1];
-        targetUrl = `https://${domain}`;
-      }
-
-      if (targetUrl && targetUrl.startsWith('http')) {
-        const parsed = new URL(targetUrl);
-        const domain = parsed.hostname.replace(/^www\./, '');
-
-        results.push({
-          title: cleanText.slice(0, 80) + '...',
-          url: targetUrl,
-          snippet: cleanText.slice(0, 300),
-          domain,
-          contactEmail: emailMatch ? emailMatch[1] : undefined
-        });
+        if (
+          (text.includes('engineer') ||
+            text.includes('developer') ||
+            text.includes('full') ||
+            text.includes('software')) &&
+          matchesRegion
+        ) {
+          seenUrls.add(j.url);
+          results.push({
+            title: `${j.title} at ${j.company_name}`,
+            url: j.url,
+            snippet: `${j.company_name} - ${j.title} (${j.candidate_required_location || 'Remote'})`,
+            domain: 'remotive.com',
+            location: j.candidate_required_location || 'Remote',
+            source: 'Remotive API'
+          });
+        }
       }
     }
   } catch {
-    // ignore
+    // skip
   }
+
+  // Arbeitnow API
+  if (results.length < limit) {
+    try {
+      const res = await axios.get('https://www.arbeitnow.com/api/job-board-api', {
+        timeout: 6000,
+        maxContentLength: 5 * 1024 * 1024,
+        maxBodyLength: 5 * 1024 * 1024,
+        headers: { 'User-Agent': getRandomUserAgent() }
+      });
+      const jobs = res.data?.data || [];
+
+      for (const j of jobs) {
+        if (results.length >= limit) break;
+        const text = `${j.title} ${j.description} ${(j.tags || []).join(' ')}`.toLowerCase();
+        const jobLoc = j.location || 'Remote';
+
+        const matchesRegion = matchesRequestedRegion(jobLoc, region);
+
+        const isTech =
+          text.includes('engineer') ||
+          text.includes('developer') ||
+          text.includes('full stack') ||
+          text.includes('software') ||
+          text.includes('next.js') ||
+          text.includes('react');
+
+        if (isTech && matchesRegion && j.url && !seenUrls.has(j.url)) {
+          seenUrls.add(j.url);
+          results.push({
+            title: `${j.title} at ${j.company_name}`,
+            url: j.url,
+            snippet: `${j.company_name} is hiring: ${j.title} (${j.location || 'Remote'})`,
+            domain: new URL(j.url).hostname.replace(/^www\./, ''),
+            location: j.location || 'Remote',
+            source: 'Arbeitnow API'
+          });
+        }
+      }
+    } catch {
+      // skip
+    }
+  }
+
   return results;
 }
 
-// 3. Combined Multi-Engine Search
-export async function searchStartupsAndJobs(
-  query: string,
-  limit: number = 10
+// 4. Hacker News "Who is Hiring" Algolia API
+export async function searchHNHiringStartups(
+  keyword: string,
+  limit: number = 5,
+  region?: string
 ): Promise<SearchResultTarget[]> {
-  // 1. First run real Google search via headless browser
-  const googleResults = await searchGoogleViaBrowser(query, limit);
-  if (googleResults.length >= limit) {
-    return googleResults.slice(0, limit);
+  const results: SearchResultTarget[] = [];
+  const seenDomains = new Set<string>();
+
+  try {
+    const threadSearch = await axios.get(
+      `https://hn.algolia.com/api/v1/search?query="Ask HN: Who is hiring?"&tags=story&hitsPerPage=2`,
+      {
+        timeout: 6000,
+        maxContentLength: 5 * 1024 * 1024,
+        maxBodyLength: 5 * 1024 * 1024,
+        headers: { 'User-Agent': getRandomUserAgent() }
+      }
+    );
+
+    const latestThread = threadSearch.data?.hits?.[0];
+    if (!latestThread) return [];
+
+    const threadId = latestThread.objectID;
+    const cleanKeyword = keyword.toLowerCase().includes('next')
+      ? 'next'
+      : keyword.toLowerCase().includes('full stack')
+        ? 'full stack'
+        : 'engineer';
+
+    const commentsSearch = await axios.get(
+      `https://hn.algolia.com/api/v1/search?tags=comment,story_${threadId}&query=${encodeURIComponent(cleanKeyword)}&hitsPerPage=${limit * 2}`,
+      {
+        timeout: 6000,
+        maxContentLength: 5 * 1024 * 1024,
+        maxBodyLength: 5 * 1024 * 1024,
+        headers: { 'User-Agent': getRandomUserAgent() }
+      }
+    );
+
+    const comments = commentsSearch.data?.hits || [];
+
+    for (const comment of comments) {
+      if (results.length >= limit) break;
+
+      const rawText = (comment.comment_text || '').replace(/<[^>]+>/g, ' ');
+      if (rawText.length < 50) continue;
+
+      const emails = extractEmailsFromHtml(comment.comment_text || '');
+      const contactEmail = emails[0];
+
+      const urlMatches = (comment.comment_text || '').match(/href=["'](https?:\/\/[^"']+)["']/gi) || [];
+      for (const rawMatch of urlMatches) {
+        const cleanUrl = rawMatch
+          .replace(/^href=["']/, '')
+          .replace(/["']$/, '')
+          .replace(/&amp;/g, '&');
+
+        if (
+          cleanUrl.startsWith('http') &&
+          !cleanUrl.includes('ycombinator.com') &&
+          !cleanUrl.includes('github.com')
+        ) {
+          try {
+            const domain = new URL(cleanUrl).hostname.replace(/^www\./, '');
+            if (!seenDomains.has(domain) && !IGNORED_DOMAINS.some((d) => domain.includes(d))) {
+              seenDomains.add(domain);
+              const firstLine = rawText.split('\n')[0].slice(0, 80);
+              results.push({
+                title: firstLine || 'Hacker News Startup Lead',
+                url: cleanUrl,
+                snippet: rawText.slice(0, 300),
+                domain,
+                contactEmail,
+                location: region || 'Remote',
+                source: 'Hacker News'
+              });
+              break;
+            }
+          } catch {
+            // invalid URL
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[HN Search Warning] Hacker News API query warning: ${err.message}`);
   }
 
-  // 2. Supplement with Hacker News Who is Hiring
-  const hnResults = await searchHNHiringStartups(query, limit - googleResults.length);
-  return [...googleResults, ...hnResults];
+  return results;
 }
 
-// Preset Dorks and Keyword Strategies
+// 5. Combined Multi-Engine Search with Region & Engine Selection
+export async function searchStartupsAndJobs(
+  query: string,
+  limit: number = 10,
+  region?: string,
+  engineChoice?: string
+): Promise<SearchResultTarget[]> {
+  const combined: SearchResultTarget[] = [];
+  const seenUrls = new Set<string>();
+  const engine = (engineChoice || process.env.DEFAULT_SEARCH_ENGINE || 'bing').toLowerCase();
+
+  // Mode 1: Bing Search Primary
+  if (engine === 'bing' || engine === 'all') {
+    console.log(
+      chalk.gray(
+        `  • Querying Bing Live Search [Region: ${region || 'Worldwide / Remote'}]...`
+      )
+    );
+    const bingResults = await searchBingLive(query, limit, region);
+    for (const r of bingResults) {
+      if (!seenUrls.has(r.url)) {
+        seenUrls.add(r.url);
+        combined.push(r);
+      }
+    }
+  }
+
+  // Mode 2: Remote Job APIs (Remotive + Arbeitnow)
+  if (combined.length < limit) {
+    const remaining = limit - combined.length;
+    const remoteResults = await searchRemoteFeeds(query, remaining, region);
+    for (const r of remoteResults) {
+      if (!seenUrls.has(r.url)) {
+        seenUrls.add(r.url);
+        combined.push(r);
+      }
+    }
+  }
+
+  // Mode 3: Hacker News "Who is Hiring"
+  if (combined.length < limit) {
+    const remaining = limit - combined.length;
+    const hnResults = await searchHNHiringStartups(query, remaining, region);
+    for (const r of hnResults) {
+      if (!seenUrls.has(r.url)) {
+        seenUrls.add(r.url);
+        combined.push(r);
+      }
+    }
+  }
+
+  // Mode 4: Google Search (ONLY if engine is explicitly set to google or all)
+  if ((engine === 'google' || engine === 'all') && combined.length < limit) {
+    const remaining = limit - combined.length;
+    console.log(
+      chalk.gray(
+        `  • Querying Google Search for Direct ATS Postings (${remaining} needed)...`
+      )
+    );
+    const googleResults = await searchGoogleLive(query, remaining, region);
+    for (const r of googleResults) {
+      if (!seenUrls.has(r.url)) {
+        seenUrls.add(r.url);
+        combined.push(r);
+      }
+    }
+  }
+
+  return combined.slice(0, limit);
+}
+
 export const SEARCH_PRESETS: Record<string, string[]> = {
-  'ai-startups': [
-    'AI startups hiring remote Next.js',
-    'site:boards.greenhouse.io "AI" "Software Engineer" "Remote"',
-    'site:jobs.lever.co "AI" "Full Stack" "Remote"',
-    'site:ashbyhq.com "AI" "TypeScript" "Remote"'
+  'fullstack-ai': [
+    'site:lever.co "Full Stack" OR "AI Engineer" remote',
+    'site:greenhouse.io "Full Stack Engineer" "TypeScript" remote',
+    'site:ashbyhq.com "Full Stack Engineer" "Next.js" remote'
   ],
-  'nextjs-fullstack': [
-    'Next.js remote full stack developer startup jobs',
-    'site:boards.greenhouse.io "Next.js" "TypeScript" "Remote"',
-    'site:jobs.lever.co "Next.js" "Node.js" "Remote"'
+  'nextjs-architect': [
+    'site:lever.co "Next.js" "Software Engineer" remote',
+    'site:greenhouse.io "Senior Frontend" "Next.js" remote',
+    'site:ashbyhq.com "Senior Full Stack" "Next.js" remote'
   ],
-  'yc-startups': [
-    'site:workatastartup.com/companies "Full Stack" "Remote"',
-    '"Y Combinator" "Software Engineer" "Remote" "careers"'
+  'mcp-agentic': [
+    'site:lever.co "AI Engineer" OR "Model Context Protocol" remote',
+    'site:greenhouse.io "AI Agent" "Full Stack" remote',
+    'site:ashbyhq.com "Founding Engineer" "AI" remote'
   ],
-  'backend-microservices': [
-    'site:boards.greenhouse.io "NestJS" OR "Node.js" "Microservices" "Remote"',
-    'site:jobs.lever.co "Backend Engineer" "PostgreSQL" "GCP" "Remote"'
+  'pakistan-tech': [
+    'site:lever.co "Pakistan" "Full Stack" OR "Next.js"',
+    'site:greenhouse.io "Pakistan" "Software Engineer"',
+    'site:ashbyhq.com "Pakistan" OR "Lahore" OR "Karachi" "Engineer"'
   ]
 };

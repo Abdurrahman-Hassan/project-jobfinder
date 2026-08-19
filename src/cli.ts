@@ -1,234 +1,260 @@
-import 'dotenv/config';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import fs from 'fs/promises';
-import { processJobTarget } from './pipeline.js';
-import { getStoredLeads, saveLead } from './tracker/db.js';
-import { sendOrDraftEmail } from './mailer/emailSender.js';
+import path from 'path';
+import dotenv from 'dotenv';
+import readline from 'readline';
+import { parseResumeFileToProfile } from './importer/resumeParser.js';
+import { processJobTarget, processDirectJD } from './pipeline.js';
+import { searchStartupsAndJobs, SEARCH_PRESETS } from './discovery/searchEngine.js';
+import { getStoredLeads, saveLead, getTodaySentCount } from './tracker/db.js';
+
+dotenv.config();
 
 const program = new Command();
 
 program
   .name('jobfinder')
-  .description('JobFinder Pro - Automated AI Job Sourcing, Resume Tailoring & Outreach Engine')
+  .description('Autonomous AI Job Hunter & Resume Tailoring Engine')
   .version('1.0.0');
 
+// 1. Import CV Command
 program
-  .command('import-cv')
-  .description('Import and parse any CV / Resume file (.pdf, .txt, .md, .json) to automatically create a custom profile')
-  .argument('<filePath>', 'Path to resume/CV file (e.g. ./my_resume.pdf or ./cv.txt)')
+  .command('import-cv <filePath>')
+  .description('Import a candidate CV (JSON, TXT, MD) and save as the active profile')
   .action(async (filePath: string) => {
     try {
-      console.log(chalk.bold.cyan(`📄 Importing and parsing CV from: ${filePath}...`));
-      const { parseResumeFileToProfile } = await import('./importer/resumeParser.js');
+      console.log(chalk.bold.blue(`📄 Importing candidate profile from: ${filePath}`));
       const profile = await parseResumeFileToProfile(filePath);
-      console.log(chalk.bold.green(`\n✅ Successfully parsed profile for: ${profile.name} (${profile.title})`));
-      console.log(chalk.green(`📧 Contact: ${profile.email} | ${profile.phone}`));
-      console.log(chalk.green(`💼 Work Experiences Loaded: ${profile.experiences.length}`));
-      console.log(chalk.green(`🛠️  Skill Categories: ${profile.skillCategories.length}`));
-      console.log(chalk.bold.yellow(`\n💾 Profile saved to: src/config/profile.json and is now active for all searches!`));
+      console.log(chalk.bold.green(`\n✓ Successfully loaded profile for: ${profile.name} (${profile.title})`));
+      console.log(chalk.gray(`Skills: ${profile.skillCategories.map((c) => c.category).join(', ')}`));
     } catch (err: any) {
-      console.error(chalk.red(`❌ Failed to import CV: ${err.message}`));
+      console.error(chalk.red(`Error importing CV: ${err.message}`));
     }
   });
 
+// 2. Process Job URL Command
 program
-  .command('process')
-  .description('Process a company website, career link, or specific job posting URL')
-  .argument('<url>', 'Target URL or domain (e.g., stripe.com/careers or https://boards.greenhouse.io/...)')
+  .command('process <url>')
+  .description('Scrape a target career page, enrich decision makers, tailor resume, and generate PDF')
   .action(async (url: string) => {
     try {
-      console.log(chalk.bold.green('🚀 Launching JobFinder Pro Pipeline...'));
       await processJobTarget(url);
-      console.log(chalk.bold.green('\n✅ Processing complete! Check output/ directory for PDFs and drafts.'));
     } catch (err: any) {
-      console.error(chalk.red(`❌ Execution error: ${err.message}`));
+      console.error(chalk.red(`Pipeline error: ${err.message}`));
     }
   });
 
+// 3. Process Direct JD Command
 program
-  .command('process-jd')
-  .description('Process a raw Job Description file or text directly (e.g. copied from LinkedIn/Indeed)')
-  .argument('<fileOrText>', 'Path to file containing JD or text')
-  .option('-c, --company <name>', 'Company Name', 'Target Company')
-  .option('-t, --title <title>', 'Job Title', 'Full Stack Software Engineer')
-  .option('-e, --email <email>', 'Target Contact Email')
-  .action(async (fileOrText: string, options: any) => {
+  .command('process-jd <fileOrText>')
+  .description('Process raw Job Description text or a JD text file')
+  .option('-c, --company <company>', 'Company name', 'Target Company')
+  .option('-t, --title <title>', 'Job title', 'Software Engineer')
+  .option('-e, --email <email>', 'Recipient contact email')
+  .action(async (fileOrText: string, options) => {
     try {
       let jdContent = fileOrText;
       try {
         const fileData = await fs.readFile(fileOrText, 'utf-8');
         jdContent = fileData;
       } catch {
-        // Not a file path, treat as raw text
+        // fileOrText is the raw text
       }
 
-      console.log(chalk.bold.green('🚀 Processing direct Job Description...'));
-      const { processDirectJD } = await import('./pipeline.js');
       await processDirectJD({
         companyName: options.company,
         jobTitle: options.title,
         descriptionText: jdContent,
         contactEmail: options.email
       });
-      console.log(chalk.bold.green('\n✅ Processing complete! Check output/ directory for tailored PDF & email.'));
     } catch (err: any) {
-      console.error(chalk.red(`❌ Execution error: ${err.message}`));
+      console.error(chalk.red(`Error: ${err.message}`));
     }
   });
 
+// 4. Search Startups and Career Pages
 program
-  .command('search')
-  .description('Search Google/DuckDuckGo for startups & jobs matching keywords, then auto-process them')
-  .argument('<query>', 'Search keywords (e.g. "AI startups hiring remote Next.js", "site:boards.greenhouse.io Full Stack")')
-  .option('-l, --limit <number>', 'Number of target sites to process', '5')
-  .option('--no-auto-process', 'Only display discovered URLs without processing them')
-  .action(async (query: string, options: any) => {
+  .command('search <query>')
+  .description('Search startups, career pages, and ATS boards matching query')
+  .option('-l, --limit <number>', 'Number of targets to find', '5')
+  .option('-r, --region <region>', 'Target region or location (e.g. Worldwide, US, Europe, Pakistan, Remote)', 'Worldwide')
+  .option('-e, --engine <engine>', 'Search engine to use (bing, google, all)', 'bing')
+  .option('-b, --browser <browser>', 'Browser to use (chrome, edge, brave, chromium)')
+  .option('--no-auto-process', 'Only search and list results without processing applications')
+  .action(async (query: string, options) => {
     try {
-      const { searchStartupsAndJobs } = await import('./discovery/searchEngine.js');
-      const limit = parseInt(options.limit, 10) || 5;
+      if (options.browser) {
+        process.env.BROWSER_TYPE = options.browser;
+      }
+      const limit = Math.min(50, Math.max(1, parseInt(options.limit, 10) || 5));
+      const region = options.region || 'Worldwide';
+      const engine = options.engine || 'bing';
+      console.log(chalk.bold.cyan(`\n🔍 Searching startups and job boards for: "${query}" [Engine: ${engine.toUpperCase()}] [Region: ${region}] (Limit: ${limit})...`));
+      const targets = await searchStartupsAndJobs(query, limit, region, engine);
 
-      console.log(chalk.bold.cyan(`🔎 Searching for startups & jobs: "${query}" (Limit: ${limit})...`));
-      const results = await searchStartupsAndJobs(query, limit);
-
-      if (results.length === 0) {
-        console.log(chalk.yellow('No matching startup targets found. Try broader keywords.'));
+      if (targets.length === 0) {
+        console.log(chalk.yellow('No matching targets found.'));
         return;
       }
 
-      console.log(chalk.bold.green(`\n🎯 Discovered ${results.length} Target(s):`));
-      results.forEach((r, i) => {
-        console.log(`${i + 1}. ${chalk.bold(r.title)} (${chalk.blue(r.url)})`);
+      console.log(chalk.green(`\nFound ${targets.length} target(s):`));
+      targets.forEach((t, idx) => {
+        console.log(`  ${idx + 1}. ${chalk.bold(t.title)} (${chalk.blue(t.domain)})`);
+        console.log(`     URL: ${t.url}`);
+        if (t.location) console.log(`     Location: ${chalk.cyan(t.location)}`);
+        if (t.contactEmail) console.log(`     Contact: ${chalk.magenta(t.contactEmail)}`);
       });
 
       if (options.autoProcess) {
-        console.log(chalk.bold.magenta('\n🚀 Auto-processing discovered targets through JobFinder Pro pipeline...'));
-        for (let i = 0; i < results.length; i++) {
-          const r = results[i];
-          console.log(chalk.bold.magenta(`\n========================================`));
-          console.log(chalk.bold.magenta(`[${i + 1}/${results.length}] Target: ${r.url}`));
-          console.log(chalk.bold.magenta(`========================================`));
+        console.log(chalk.bold.green(`\n🚀 Auto-processing discovered targets (Goal: ${limit} direct company leads)...`));
+        let successfulCount = 0;
+
+        for (const target of targets) {
+          if (successfulCount >= limit) break;
           try {
-            await processJobTarget(r.url);
+            const leads = await processJobTarget(target.url);
+            if (leads && leads.length > 0) {
+              successfulCount += leads.length;
+            }
           } catch (err: any) {
-            console.error(chalk.red(`Failed processing ${r.url}: ${err.message}`));
+            console.error(chalk.red(`Failed processing ${target.url}: ${err.message}`));
           }
         }
-        console.log(chalk.bold.green('\n🎉 Finished processing all search targets!'));
+
+        console.log(chalk.bold.cyan(`\n✨ Sourcing complete: ${successfulCount} application(s) tailored to output/resumes/ and output/drafts/`));
       }
     } catch (err: any) {
-      console.error(chalk.red(`❌ Search error: ${err.message}`));
+      console.error(chalk.red(`Search error: ${err.message}`));
     }
   });
 
+// 5. Curated Auto Hunt
 program
-  .command('auto-hunt')
-  .description('Run automated hunting on curated startup presets (ai-startups, nextjs-fullstack, yc-startups, backend-microservices)')
-  .argument('[preset]', 'Preset category: ai-startups | nextjs-fullstack | yc-startups | backend-microservices | all', 'ai-startups')
-  .option('-l, --limit <number>', 'Limit per search query', '3')
-  .action(async (preset: string, options: any) => {
-    try {
-      const { searchStartupsAndJobs, SEARCH_PRESETS } = await import('./discovery/searchEngine.js');
-      const limit = parseInt(options.limit, 10) || 3;
+  .command('auto-hunt [preset]')
+  .description('Run curated autonomous hunt. Presets: fullstack-ai, nextjs-architect, mcp-agentic')
+  .option('-l, --limit <number>', 'Targets per query', '3')
+  .option('-r, --region <region>', 'Target region (e.g. Worldwide, US, Europe, Remote)', 'Worldwide')
+  .option('-e, --engine <engine>', 'Search engine to use (bing, google, all)', 'bing')
+  .option('-b, --browser <browser>', 'Browser to use (chrome, edge, brave, chromium)')
+  .action(async (preset: string = 'fullstack-ai', options) => {
+    if (options.browser) {
+      process.env.BROWSER_TYPE = options.browser;
+    }
+    const queries = SEARCH_PRESETS[preset] || SEARCH_PRESETS['fullstack-ai'];
+    const limit = Math.min(20, Math.max(1, parseInt(options.limit, 10) || 3));
+    const region = options.region || 'Worldwide';
+    const engine = options.engine || 'bing';
 
-      let queries: string[] = [];
-      if (preset === 'all') {
-        Object.values(SEARCH_PRESETS).forEach((qList) => queries.push(...qList));
-      } else if (SEARCH_PRESETS[preset]) {
-        queries = SEARCH_PRESETS[preset];
-      } else {
-        console.log(chalk.red(`Invalid preset. Choose from: ${Object.keys(SEARCH_PRESETS).join(', ')}, all`));
-        return;
-      }
+    console.log(chalk.bold.magenta(`\n🎯 Starting Autonomous Job Hunt [Preset: ${preset}] [Engine: ${engine.toUpperCase()}] [Region: ${region}]`));
 
-      console.log(chalk.bold.cyan(`🏹 Launching Auto-Hunt Preset [${preset}] with ${queries.length} query strategy(ies)...`));
+    for (const query of queries) {
+      console.log(chalk.cyan(`\n── Executing Dork Query: "${query}" ──`));
+      const targets = await searchStartupsAndJobs(query, limit, region, engine);
 
-      const allDiscoveredUrls = new Set<string>();
-
-      for (const q of queries) {
-        console.log(chalk.cyan(`\n🔍 Searching: ${q}`));
-        const res = await searchStartupsAndJobs(q, limit);
-        res.forEach((item) => allDiscoveredUrls.add(item.url));
-      }
-
-      const targetList = Array.from(allDiscoveredUrls);
-      console.log(chalk.bold.green(`\n🎯 Total Unique Targets Discovered: ${targetList.length}`));
-
-      for (let i = 0; i < targetList.length; i++) {
-        const u = targetList[i];
-        console.log(chalk.bold.magenta(`\n========================================`));
-        console.log(chalk.bold.magenta(`[${i + 1}/${targetList.length}] Processing: ${u}`));
-        console.log(chalk.bold.magenta(`========================================`));
+      for (const target of targets) {
         try {
-          await processJobTarget(u);
+          await processJobTarget(target.url);
         } catch (err: any) {
-          console.error(chalk.red(`Failed processing ${u}: ${err.message}`));
+          console.error(chalk.red(`Failed to process ${target.url}: ${err.message}`));
         }
       }
-
-      console.log(chalk.bold.green('\n🎉 Auto-hunt batch completed!'));
-    } catch (err: any) {
-      console.error(chalk.red(`❌ Auto-hunt error: ${err.message}`));
     }
+    console.log(chalk.bold.green('\n🎉 Hunt complete! Check "npm run stats" or output/resumes/ and output/drafts/'));
   });
 
+// 6. Detected Browsers
 program
-  .command('bulk')
-  .description('Process a text file with a list of target URLs / domains (one per line)')
-  .argument('<filePath>', 'Path to text file containing target URLs')
+  .command('browsers')
+  .description('List all detected web browsers available on this machine')
+  .action(async () => {
+    const { listAvailableBrowsers, getBrowserExecutable } = await import('./utils/browserManager.js');
+    const browsers = await listAvailableBrowsers();
+    const active = await getBrowserExecutable();
+
+    console.log(chalk.bold.cyan('\n🌐 Installed Browser Matrix:'));
+    if (browsers.length === 0) {
+      console.log(chalk.yellow('No system browsers found. Puppeteer bundled Chromium will be used.'));
+      return;
+    }
+
+    browsers.forEach((b, idx) => {
+      const isSelected = b.path === active;
+      const marker = isSelected ? chalk.bold.green('✓ [ACTIVE]') : chalk.gray(' ');
+      console.log(`  ${idx + 1}. ${marker} ${chalk.bold(b.name)} (${chalk.blue(b.type)})`);
+      console.log(`     Path: ${chalk.gray(b.path)}`);
+    });
+
+    console.log(chalk.gray('\nTip: To change browser, run with "-b edge" or set BROWSER_TYPE=edge in .env'));
+  });
+
+// 6. Bulk Process URLs from a File
+program
+  .command('bulk <filePath>')
+  .description('Process a list of job/career URLs from a text file (one URL per line)')
   .action(async (filePath: string) => {
     try {
-      const content = await fs.readFile(filePath, 'utf-8');
+      const resolvedPath = path.resolve(process.cwd(), filePath);
+      const content = await fs.readFile(resolvedPath, 'utf-8');
       const urls = content
         .split('\n')
-        .map((u) => u.trim())
-        .filter((u) => u.length > 0 && !u.startsWith('#'));
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0 && !l.startsWith('#'));
 
-      console.log(chalk.bold.green(`📋 Found ${urls.length} target(s) in bulk list.`));
+      console.log(chalk.bold.cyan(`\n📋 Processing ${urls.length} URLs in bulk from ${filePath}...`));
 
       for (let i = 0; i < urls.length; i++) {
-        const u = urls[i];
-        console.log(chalk.bold.magenta(`\n========================================`));
-        console.log(chalk.bold.magenta(`[${i + 1}/${urls.length}] Processing Target: ${u}`));
-        console.log(chalk.bold.magenta(`========================================`));
+        const url = urls[i];
+        console.log(chalk.bold.blue(`\n[${i + 1}/${urls.length}] Target: ${url}`));
         try {
-          await processJobTarget(u);
+          await processJobTarget(url);
         } catch (err: any) {
-          console.error(chalk.red(`Failed processing ${u}: ${err.message}`));
+          console.error(chalk.red(`Failed on ${url}: ${err.message}`));
         }
       }
-      console.log(chalk.bold.green('\n🎉 Bulk batch completed!'));
     } catch (err: any) {
-      console.error(chalk.red(`❌ Bulk error: ${err.message}`));
+      console.error(chalk.red(`Bulk error: ${err.message}`));
     }
   });
 
+// 7. CRM Dashboard Stats
 program
   .command('stats')
-  .description('Show summary of all discovered, tailored, and sent job leads')
+  .description('Show CRM statistics of all processed, tailored, and sent leads')
   .action(async () => {
     const leads = await getStoredLeads();
-    console.log(chalk.bold.cyan('\n📊 JobFinder Pro CRM Statistics:'));
-    console.log(`Total Leads Processed: ${chalk.bold(leads.length.toString())}`);
-
     const tailored = leads.filter((l) => l.status === 'TAILORED').length;
     const sent = leads.filter((l) => l.status === 'SENT').length;
+    const failed = leads.filter((l) => l.status === 'FAILED').length;
+    const todaySent = await getTodaySentCount();
+    const dailyLimit = parseInt(process.env.DAILY_EMAIL_LIMIT || '20', 10);
 
-    console.log(`- Tailored & Drafted: ${chalk.yellow(tailored.toString())}`);
-    console.log(`- Sent Applications: ${chalk.green(sent.toString())}`);
+    console.log(chalk.bold.cyan('\n📊 JobFinder Pro CRM Statistics:'));
+    console.log(`Total Leads Processed: ${chalk.bold(leads.length)}`);
+    console.log(`- Tailored & Drafted: ${chalk.yellow(tailored)}`);
+    console.log(`- Sent Applications: ${chalk.green(sent)}`);
+    if (failed > 0) console.log(`- Failed / Incomplete: ${chalk.red(failed)}`);
+    console.log(`- Sent Today: ${chalk.bold.magenta(todaySent)} / ${chalk.gray(dailyLimit)} (Daily Cap)`);
 
-    console.log(chalk.bold('\nRecent Leads:'));
-    leads.slice(0, 10).forEach((l, idx) => {
-      console.log(
-        `${idx + 1}. [${l.status}] ${l.job.companyName} - ${l.job.jobTitle} (ATS Score: ${l.analysis.matchScore}/10) -> ${l.job.contactEmail}`
-      );
-    });
+    if (leads.length > 0) {
+      console.log(chalk.bold('\nRecent Leads:'));
+      leads.slice(0, 10).forEach((l, idx) => {
+        const statusColor =
+          l.status === 'SENT' ? chalk.green : l.status === 'FAILED' ? chalk.red : chalk.yellow;
+        console.log(
+          `${idx + 1}. [${statusColor(l.status)}] ${l.job?.companyName || 'Unknown'} - ${l.job?.jobTitle || 'Role'} (ATS Score: ${l.analysis?.matchScore || 0}/10) -> ${l.job?.contactEmail || 'No email'}`
+        );
+      });
+    }
+    console.log('');
   });
 
+// 8. Send Approved Drafts via Gmail
 program
   .command('send-approved')
-  .description('Send all pending drafted leads via Gmail (disabling dry run)')
-  .action(async () => {
+  .description('Send pending drafted leads via Gmail with daily limit and SMTP safety')
+  .option('-y, --yes', 'Skip confirmation prompt and send immediately')
+  .action(async (options) => {
     process.env.DRY_RUN = 'false';
     const leads = await getStoredLeads();
     const pending = leads.filter((l) => l.status === 'TAILORED');
@@ -238,20 +264,78 @@ program
       return;
     }
 
-    console.log(chalk.bold.green(`📨 Sending ${pending.length} pending applications...`));
+    // Daily Send Limit Check
+    const dailyLimit = parseInt(process.env.DAILY_EMAIL_LIMIT || '20', 10);
+    const todaySent = await getTodaySentCount();
+    const remainingQuota = Math.max(0, dailyLimit - todaySent);
 
-    for (const lead of pending) {
-      console.log(`Sending to ${lead.job.contactEmail} (${lead.job.companyName})...`);
+    if (remainingQuota <= 0) {
+      console.log(
+        chalk.bold.red(
+          `🛑 Daily email limit reached (${todaySent}/${dailyLimit} sent today). To protect domain reputation, sending is halted until tomorrow.`
+        )
+      );
+      return;
+    }
+
+    const toSendCount = Math.min(pending.length, remainingQuota);
+
+    // Confirmation Prompt (if not bypassed with -y)
+    if (!options.yes) {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+
+      const answer = await new Promise<string>((resolve) => {
+        rl.question(
+          chalk.bold.yellow(
+            `\n⚠️ You are about to send ${toSendCount} live email(s) via Gmail (Daily quota remaining: ${remainingQuota}). Proceed? [y/N]: `
+          ),
+          resolve
+        );
+      });
+      rl.close();
+
+      if (answer.trim().toLowerCase() !== 'y') {
+        console.log(chalk.gray('Sending cancelled.'));
+        return;
+      }
+    }
+
+    const { verifySmtpConnection, sendOrDraftEmail } = await import('./mailer/emailSender.js');
+    const isSmtpValid = await verifySmtpConnection();
+    if (!isSmtpValid) {
+      console.log(chalk.bold.red('❌ SMTP Authentication failed. Halting send queue. Check GMAIL_APP_PASSWORD.'));
+      return;
+    }
+
+    console.log(chalk.bold.green(`\n📨 Sending ${toSendCount} pending application(s) via Gmail...`));
+
+    for (let i = 0; i < toSendCount; i++) {
+      const lead = pending[i];
+      console.log(`\n[${i + 1}/${toSendCount}] Sending to ${lead.job.contactEmail} (${lead.job.companyName})...`);
       const res = await sendOrDraftEmail(lead);
+
       if (res.mode === 'SENT') {
         lead.status = 'SENT';
         lead.sentAt = new Date().toISOString();
         await saveLead(lead);
-        console.log(chalk.green(`✓ Sent!`));
+        console.log(chalk.green(`✓ Successfully sent to ${lead.job.contactEmail}!`));
+
+        // Randomized human delay between consecutive sends (45s - 90s)
+        if (i < toSendCount - 1) {
+          const minDelay = parseInt(process.env.MIN_DELAY_SECONDS || '45', 10);
+          const maxDelay = parseInt(process.env.MAX_DELAY_SECONDS || '90', 10);
+          const delaySec = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+          console.log(chalk.cyan(`⏳ Waiting ${delaySec}s before next send to protect domain reputation...`));
+          await new Promise((resolve) => setTimeout(resolve, delaySec * 1000));
+        }
       } else {
-        console.log(chalk.red(`Failed: ${res.error}`));
+        console.log(chalk.red(`Failed sending to ${lead.job.contactEmail}: ${res.error}`));
       }
     }
+    console.log(chalk.bold.green('\n🎉 Send queue completed! Check "npm run stats".'));
   });
 
 program.parse(process.argv);

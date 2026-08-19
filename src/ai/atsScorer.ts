@@ -1,117 +1,152 @@
 import { CandidateProfile, JobListing } from '../types/index.js';
 
+function escapeRegex(string: string): string {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function calculateATSScore(
   profile: CandidateProfile,
   job: JobListing
-): {
-  score: number;
-  matchingKeywords: string[];
-  missingKeywords: string[];
-} {
-  const jdText = `${job.jobTitle} ${job.descriptionText} ${job.requirements.join(' ')}`.toLowerCase();
+): { score: number; matchingKeywords: string[]; missingKeywords: string[] } {
+  // Defensive runtime array guards
+  const skillCategories = Array.isArray(profile.skillCategories) ? profile.skillCategories : [];
+  const experiences = Array.isArray(profile.experiences) ? profile.experiences : [];
+  const keyProjects = Array.isArray(profile.keyProjects) ? profile.keyProjects : [];
+  const requirements = Array.isArray(job.requirements) ? job.requirements : [];
 
-  // All skills and keywords from profile
-  const allProfileSkills: string[] = [];
-  for (const cat of profile.skillCategories) {
-    allProfileSkills.push(...cat.skills);
-  }
-  for (const exp of profile.experiences) {
-    allProfileSkills.push(...exp.keywords);
-  }
-  for (const proj of profile.keyProjects) {
-    allProfileSkills.push(...proj.technologies);
+  const profileKeywords = new Set<string>();
+
+  for (const cat of skillCategories) {
+    if (Array.isArray(cat.skills)) {
+      for (const skill of cat.skills) {
+        if (skill) profileKeywords.add(skill.toLowerCase().trim());
+      }
+    }
   }
 
-  // Canonicalize list
-  const uniqueCandidateKeywords = Array.from(new Set(allProfileSkills));
+  for (const exp of experiences) {
+    if (Array.isArray(exp.keywords)) {
+      for (const kw of exp.keywords) {
+        if (kw) profileKeywords.add(kw.toLowerCase().trim());
+      }
+    }
+  }
 
-  // Common tech dictionary to scan for in JD
-  const techKeywordsDictionary = [
+  for (const proj of keyProjects) {
+    if (Array.isArray(proj.technologies)) {
+      for (const tech of proj.technologies) {
+        if (tech) profileKeywords.add(tech.toLowerCase().trim());
+      }
+    }
+  }
+
+  const jdText = `${job.jobTitle || ''} ${job.descriptionText || ''} ${requirements.join(' ')}`.toLowerCase();
+
+  const standardTechKeywords = [
     'typescript',
     'javascript',
+    'python',
     'react',
-    'react.js',
     'next.js',
-    'nextjs',
     'node.js',
-    'nodejs',
     'nestjs',
     'express',
-    'fastify',
-    'python',
-    'sql',
+    'graphql',
+    'rest api',
     'postgresql',
     'postgres',
-    'supabase',
     'mongodb',
     'redis',
     'docker',
-    'gcp',
+    'kubernetes',
     'aws',
-    'cloud run',
-    'ec2',
-    's3',
-    'lambda',
-    'microservices',
-    'rest',
-    'restful',
-    'graphql',
-    'tailwind',
-    'tailwind css',
-    'storyblok',
-    'headless cms',
+    'gcp',
+    'google cloud',
+    'azure',
     'ci/cd',
-    'github actions',
-    'playwright',
-    'jest',
+    'git',
+    'microservices',
+    'serverless',
+    'tailwindcss',
+    'tailwind',
     'mcp',
     'model context protocol',
+    'ai',
     'llm',
-    'openai',
-    'saas',
-    'e-commerce',
-    'seo',
-    'ssr',
+    'prompt engineering',
+    'system design',
+    'scalable',
     'performance',
-    'leadership',
-    'lead',
-    'agile'
+    'testing',
+    'jest',
+    'cypress',
+    'playwright',
+    'linux',
+    'terraform',
+    'kafka',
+    'rabbitmq',
+    'elasticsearch',
+    'prisma',
+    'typeorm',
+    'c++',
+    'c#',
+    'golang',
+    'rust'
   ];
 
-  const jdMatchedTech: string[] = [];
-  for (const kw of techKeywordsDictionary) {
-    const regex = new RegExp(`\\b${kw.replace('.', '\\.')}\\b`, 'i');
+  const jdKeywords = new Set<string>();
+
+  for (const tech of standardTechKeywords) {
+    const escaped = escapeRegex(tech);
+    const regex = new RegExp(`\\b${escaped}\\b`, 'i');
     if (regex.test(jdText)) {
-      jdMatchedTech.push(kw);
+      jdKeywords.add(tech);
     }
   }
 
-  const matching: string[] = [];
-  const missing: string[] = [];
+  // Also check profile's explicit keywords against the JD text
+  for (const pkw of profileKeywords) {
+    if (pkw.length > 2) {
+      const escaped = escapeRegex(pkw);
+      const regex = new RegExp(`\\b${escaped}\\b`, 'i');
+      if (regex.test(jdText)) {
+        jdKeywords.add(pkw);
+      }
+    }
+  }
 
-  for (const tech of jdMatchedTech) {
-    const isPresentInProfile = uniqueCandidateKeywords.some((skill) =>
-      skill.toLowerCase().includes(tech.toLowerCase())
-    );
-    if (isPresentInProfile) {
-      matching.push(tech);
+  const matchingKeywords: string[] = [];
+  const missingKeywords: string[] = [];
+
+  for (const jkw of jdKeywords) {
+    let matched = false;
+    for (const pkw of profileKeywords) {
+      if (pkw === jkw || pkw.includes(jkw) || jkw.includes(pkw)) {
+        matched = true;
+        break;
+      }
+    }
+    if (matched) {
+      matchingKeywords.push(jkw);
     } else {
-      missing.push(tech);
+      missingKeywords.push(jkw);
     }
   }
 
-  // Score Calculation
-  let baseScore = 7.0;
-  if (jdMatchedTech.length > 0) {
-    const ratio = matching.length / jdMatchedTech.length;
-    baseScore = 7.5 + ratio * 2.5; // Scale between 7.5 and 10.0
+  const total = jdKeywords.size;
+  const matchedCount = matchingKeywords.length;
+
+  let baseScore = 8.5;
+  if (total > 0) {
+    const ratio = matchedCount / total;
+    baseScore = 7.5 + ratio * 2.5;
   }
 
-  const finalScore = Math.min(9.8, Math.max(8.2, Number(baseScore.toFixed(1))));
+  const finalScore = Math.min(9.8, Math.max(8.0, Number(baseScore.toFixed(1))));
 
   return {
     score: finalScore,
-    matchingKeywords: Array.from(new Set(matching)),
-    missingKeywords: Array.from(new Set(missing))
+    matchingKeywords: Array.from(new Set(matchingKeywords)),
+    missingKeywords: Array.from(new Set(missingKeywords))
   };
 }

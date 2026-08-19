@@ -15,7 +15,8 @@
     "hunt": "tsx src/cli.ts auto-hunt",
     "bulk": "tsx src/cli.ts bulk",
     "send": "tsx src/cli.ts send-approved",
-    "stats": "tsx src/cli.ts stats"
+    "stats": "tsx src/cli.ts stats",
+    "browsers": "tsx src/cli.ts browsers"
   },
   "keywords": [
     "job-automation",

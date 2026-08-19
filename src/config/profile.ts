@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { CandidateProfile } from '../types/index.js';
 
-const DEFAULT_PROFILE: CandidateProfile = {
+export const DEFAULT_PROFILE: CandidateProfile = {
   name: 'Abdurrahman Hassan',
   title: 'Full-Stack Software Engineer & Platform Architect',
   location: 'Karachi, Pakistan (Open to Remote / Relocation)',

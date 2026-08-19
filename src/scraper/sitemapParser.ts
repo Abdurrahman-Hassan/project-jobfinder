@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { XMLParser } from 'fast-xml-parser';
+import { getRandomUserAgent } from '../utils/userAgents.js';
 
 export async function findCareerPagesFromSitemap(domainOrUrl: string): Promise<string[]> {
   let baseUrl = domainOrUrl.trim();
@@ -7,91 +8,84 @@ export async function findCareerPagesFromSitemap(domainOrUrl: string): Promise<s
     baseUrl = `https://${baseUrl}`;
   }
 
-  const parsedUrl = new URL(baseUrl);
-  const origin = parsedUrl.origin;
-  const discoveredUrls: Set<string> = new Set();
+  const parsed = new URL(baseUrl);
+  const origin = parsed.origin;
+  const careerUrls = new Set<string>();
 
-  const careerKeywords = [
-    'career',
-    'careers',
-    'job',
-    'jobs',
-    'join',
-    'join-us',
-    'work-with-us',
-    'open-positions',
-    'openings',
-    'vacancies',
-    'hiring'
-  ];
-
-  // 1. Direct standard paths to check
   const commonPaths = [
     '/careers',
     '/jobs',
-    '/join-us',
-    '/open-positions',
-    '/work-with-us',
     '/about/careers',
-    '/company/careers'
+    '/join-us',
+    '/company/careers',
+    '/career',
+    '/open-positions'
   ];
 
+  // 1. Probe common career endpoints
   for (const path of commonPaths) {
+    const testUrl = `${origin}${path}`;
     try {
-      const fullUrl = `${origin}${path}`;
-      const res = await axios.get(fullUrl, {
+      const res = await axios.head(testUrl, {
         timeout: 5000,
-        validateStatus: (status) => status >= 200 && status < 400,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        maxContentLength: 5 * 1024 * 1024,
+        maxBodyLength: 5 * 1024 * 1024,
+        headers: { 'User-Agent': getRandomUserAgent() },
+        validateStatus: (status) => status >= 200 && status < 400
       });
-      if (res.status === 200) {
-        discoveredUrls.add(fullUrl);
+      if (res.status === 200 || res.status === 301 || res.status === 302) {
+        careerUrls.add(testUrl);
       }
     } catch {
-      // ignore 404s
+      // 404 or connection failure for endpoint probe is normal
     }
   }
 
-  // 2. Check sitemap.xml
+  // 2. Parse sitemap.xml
   const sitemapEndpoints = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`];
   const parser = new XMLParser();
 
-  for (const sitemapUrl of sitemapEndpoints) {
+  for (const smUrl of sitemapEndpoints) {
     try {
-      const res = await axios.get(sitemapUrl, {
+      const res = await axios.get(smUrl, {
         timeout: 6000,
-        headers: { 'User-Agent': 'Mozilla/5.0' }
+        maxContentLength: 5 * 1024 * 1024,
+        maxBodyLength: 5 * 1024 * 1024,
+        headers: { 'User-Agent': getRandomUserAgent() }
       });
+      if (res.status === 200 && res.data && typeof res.data === 'string') {
+        const jsonObj = parser.parse(res.data);
 
-      if (res.status === 200 && typeof res.data === 'string') {
-        const parsed = parser.parse(res.data);
-        const urlList: string[] = [];
-
-        if (parsed.urlset && parsed.urlset.url) {
-          const items = Array.isArray(parsed.urlset.url) ? parsed.urlset.url : [parsed.urlset.url];
-          for (const item of items) {
-            if (item.loc) urlList.push(String(item.loc));
-          }
-        } else if (parsed.sitemapindex && parsed.sitemapindex.sitemap) {
-          const items = Array.isArray(parsed.sitemapindex.sitemap)
-            ? parsed.sitemapindex.sitemap
-            : [parsed.sitemapindex.sitemap];
-          for (const item of items) {
-            if (item.loc) urlList.push(String(item.loc));
+        // Standard sitemap (<urlset><url><loc>...</loc></url></urlset>)
+        if (jsonObj.urlset && jsonObj.urlset.url) {
+          const urls = Array.isArray(jsonObj.urlset.url)
+            ? jsonObj.urlset.url
+            : [jsonObj.urlset.url];
+          for (const item of urls) {
+            const loc = String(item.loc || '');
+            if (/career|job|position|hiring|work-with-us/i.test(loc)) {
+              careerUrls.add(loc);
+            }
           }
         }
 
-        for (const u of urlList) {
-          const lower = u.toLowerCase();
-          if (careerKeywords.some((kw) => lower.includes(kw))) {
-            discoveredUrls.add(u);
+        // Sitemap Index (<sitemapindex><sitemap><loc>...</loc></sitemap></sitemapindex>)
+        if (jsonObj.sitemapindex && jsonObj.sitemapindex.sitemap) {
+          const sitemaps = Array.isArray(jsonObj.sitemapindex.sitemap)
+            ? jsonObj.sitemapindex.sitemap
+            : [jsonObj.sitemapindex.sitemap];
+          for (const item of sitemaps) {
+            const loc = String(item.loc || '');
+            if (/career|job|position/i.test(loc)) {
+              careerUrls.add(loc);
+            }
           }
         }
       }
-    } catch {
-      // sitemap not found or blocked
+    } catch (err: any) {
+      console.warn(`[Sitemap] Note: Could not fetch sitemap at ${smUrl} (${err.message})`);
     }
   }
 
-  return Array.from(discoveredUrls);
+  return Array.from(careerUrls);
 }

@@ -1,7 +1,17 @@
 import fs from 'fs/promises';
 import path from 'path';
-import puppeteer from 'puppeteer';
 import { CandidateProfile, ATSAnalysis } from '../types/index.js';
+import { launchManagedBrowser } from '../utils/browserManager.js';
+
+function escapeHtml(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
 export async function generateResumePdf(
   profile: CandidateProfile,
@@ -12,38 +22,47 @@ export async function generateResumePdf(
   await fs.mkdir(outputDir, { recursive: true });
 
   const sanitizedCompany = companyName.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const pdfFileName = `Abdurrahman_Hassan_${sanitizedCompany}.pdf`;
+  const pdfFileName = `${profile.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_${sanitizedCompany}.pdf`;
   const pdfPath = path.join(outputDir, pdfFileName);
 
   const templatePath = path.resolve(process.cwd(), 'src', 'pdf', 'template.html');
   let html = await fs.readFile(templatePath, 'utf-8');
 
-  // Replace basic fields
-  html = html.replace(/{{name}}/g, profile.name);
-  html = html.replace(/{{location}}/g, profile.location);
-  html = html.replace(/{{phone}}/g, profile.phone);
-  html = html.replace(/{{email}}/g, profile.email);
-  html = html.replace(/{{linkedin}}/g, profile.linkedin);
-  html = html.replace(/{{github}}/g, profile.github);
-  html = html.replace(/{{portfolio}}/g, profile.portfolio);
-  html = html.replace(/{{summary}}/g, analysis.tailoredSummary);
+  // Replace basic fields with HTML entity escaping & length clamping
+  const clampedSummary =
+    analysis.tailoredSummary.length > 450
+      ? analysis.tailoredSummary.slice(0, 447) + '...'
+      : analysis.tailoredSummary;
+
+  html = html.replace(/{{name}}/g, escapeHtml(profile.name));
+  html = html.replace(/{{location}}/g, escapeHtml(profile.location));
+  html = html.replace(/{{phone}}/g, escapeHtml(profile.phone));
+  html = html.replace(/{{email}}/g, escapeHtml(profile.email));
+  html = html.replace(/{{linkedin}}/g, escapeHtml(profile.linkedin));
+  html = html.replace(/{{github}}/g, escapeHtml(profile.github));
+  html = html.replace(/{{portfolio}}/g, escapeHtml(profile.portfolio));
+  html = html.replace(/{{summary}}/g, escapeHtml(clampedSummary));
 
   // Replace Skills section
   let skillsHtml = '';
   for (const cat of analysis.tailoredSkills) {
-    skillsHtml += `<div class="skill-cat">• ${cat.category}:</div><div class="skill-items">${cat.skills.join(', ')}</div>\n`;
+    const escapedSkills = (cat.skills || []).map((s) => escapeHtml(s)).join(', ');
+    skillsHtml += `<div class="skill-cat">• ${escapeHtml(cat.category)}:</div><div class="skill-items">${escapedSkills}</div>\n`;
   }
   html = html.replace(/{{#skills}}[\s\S]*?{{\/skills}}/, skillsHtml);
 
-  // Replace Experiences section
+  // Replace Experiences section (clamped to prevent awkward page splits)
   let expHtml = '';
   for (const exp of analysis.tailoredExperiences) {
-    const bulletsHtml = exp.bullets.map((b) => `<li>${b}</li>`).join('\n');
+    const bulletsHtml = (exp.bullets || [])
+      .slice(0, 4)
+      .map((b) => `<li>${escapeHtml(b)}</li>`)
+      .join('\n');
     expHtml += `
       <div class="job-entry">
         <div class="job-header">
-          <div><span class="job-role">${exp.role}</span> — <span class="job-company">${exp.company}</span> (${exp.location})</div>
-          <div class="job-period">${exp.period}</div>
+          <div><span class="job-role">${escapeHtml(exp.role)}</span> — <span class="job-company">${escapeHtml(exp.company)}</span> (${escapeHtml(exp.location)})</div>
+          <div class="job-period">${escapeHtml(exp.period)}</div>
         </div>
         <ul>
           ${bulletsHtml}
@@ -55,44 +74,18 @@ export async function generateResumePdf(
 
   // Replace Projects section
   let projHtml = '';
-  for (const proj of profile.keyProjects.slice(0, 3)) {
+  for (const proj of (profile.keyProjects || []).slice(0, 3)) {
     projHtml += `
       <div class="project-entry">
-        <span class="project-title">${proj.name}</span> (<em>${proj.technologies.join(', ')}</em>):
-        <span class="project-desc">${proj.description}</span>
+        <span class="project-title">${escapeHtml(proj.name)}</span> (<em>${escapeHtml((proj.technologies || []).join(', '))}</em>):
+        <span class="project-desc">${escapeHtml(proj.description)}</span>
       </div>
     `;
   }
   html = html.replace(/{{#projects}}[\s\S]*?{{\/projects}}/, projHtml);
 
-  // Detect installed browser path if available
-  const possiblePaths = [
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium-browser',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-  ];
-
-  let executablePath: string | undefined = undefined;
-  for (const p of possiblePaths) {
-    try {
-      await fs.access(p);
-      executablePath = p;
-      break;
-    } catch {
-      // ignore
-    }
-  }
-
-  // Launch browser to render PDF
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
+  // Launch browser via centralized browser manager
+  const browser = await launchManagedBrowser();
 
   try {
     const page = await browser.newPage();

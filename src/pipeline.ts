@@ -1,87 +1,139 @@
 import chalk from 'chalk';
-import { MASTER_PROFILE } from './config/profile.js';
+import { randomUUID } from 'crypto';
+import { JobListing, ProcessedJobLead } from './types/index.js';
+import { getActiveProfile } from './config/profile.js';
 import { scrapeJobOrCareerPage } from './scraper/careerScraper.js';
 import { lookupApolloDecisionMaker } from './enrichment/apolloClient.js';
 import { generateTailoredApplication } from './ai/tailorEngine.js';
 import { generateResumePdf } from './pdf/pdfGenerator.js';
 import { sendOrDraftEmail } from './mailer/emailSender.js';
-import { saveLead } from './tracker/db.js';
-import { ProcessedJobLead, JobListing } from './types/index.js';
+import { saveLead, isDuplicateLead } from './tracker/db.js';
+import { isValidEmail } from './validation/schemas.js';
+import { isStaffingOrAgencyText } from './discovery/searchEngine.js';
 
 export async function processJobTarget(targetUrl: string): Promise<ProcessedJobLead[]> {
-  console.log(chalk.cyan(`\n🔍 [1/5] Sourcing & Scraping target: ${targetUrl}`));
-  const jobs = await scrapeJobOrCareerPage(targetUrl);
-  console.log(chalk.green(`✓ Discovered ${jobs.length} job listing(s) from target`));
+  const profile = getActiveProfile();
+  console.log(chalk.bold.cyan(`\n🔍 Scraping target career page: ${targetUrl}`));
+
+  let jobs: JobListing[] = [];
+  try {
+    jobs = await scrapeJobOrCareerPage(targetUrl);
+  } catch (err: any) {
+    console.error(chalk.red(`❌ Failed to scrape ${targetUrl}: ${err.message}`));
+    return [];
+  }
+
+  console.log(chalk.green(`✓ Discovered ${jobs.length} relevant position(s).`));
 
   const processedLeads: ProcessedJobLead[] = [];
 
   for (let i = 0; i < jobs.length; i++) {
     const job = jobs[i];
+
+    // 1. Direct Startup / Product Company Verification Check
+    const fullJobContext = `${job.companyName} ${job.jobTitle} ${job.descriptionText} ${job.companyDomain} ${job.url}`;
+    if (isStaffingOrAgencyText(fullJobContext)) {
+      console.log(
+        chalk.yellow(
+          `\n⏩ Skipping recruitment/staffing agency [${job.companyName}]: Only direct product startups & tech companies are targeted.`
+        )
+      );
+      continue;
+    }
+
+    // 2. Deduplication Check
+    const { isDuplicate, reason } = await isDuplicateLead(
+      job.companyDomain,
+      job.contactEmail
+    );
+    if (isDuplicate) {
+      console.log(chalk.yellow(`\n⏩ Skipping duplicate target [${job.companyName}]: ${reason}`));
+      continue;
+    }
+
     console.log(chalk.blue(`\n💼 Processing Job #${i + 1}: ${job.jobTitle} at ${job.companyName}`));
 
-    // 2. Decision Maker Enrichment (Apollo / Fallback)
-    console.log(chalk.cyan(`👤 [2/5] Looking up decision-makers & contact email...`));
-    if (job.companyDomain) {
-      const apolloContact = await lookupApolloDecisionMaker(job.companyDomain, job.companyName);
-      if (apolloContact) {
-        job.contactEmail = apolloContact.email;
-        job.contactName = apolloContact.name;
-        job.contactTitle = apolloContact.title;
-        console.log(
-          chalk.green(
-            `✓ Apollo found: ${apolloContact.name} (${apolloContact.title}) <${apolloContact.email}>`
-          )
-        );
+    // Per-job error isolation
+    try {
+      // 1. Decision Maker Enrichment (Apollo / Fallback)
+      if (job.companyDomain) {
+        console.log(chalk.gray(`  • Looking up decision makers on Apollo.io for ${job.companyDomain}...`));
+        const contact = await lookupApolloDecisionMaker(job.companyDomain, job.companyName);
+        if (contact) {
+          job.contactName = contact.name;
+          job.contactTitle = contact.title;
+          if (contact.email && isValidEmail(contact.email)) {
+            job.contactEmail = contact.email;
+          }
+          console.log(chalk.magenta(`  🎯 Found Target: ${contact.name} (${contact.title}) -> ${contact.email}`));
+        }
       }
+
+      if (!job.contactEmail) {
+        job.contactEmail = `careers@${job.companyDomain || 'company.com'}`;
+      }
+
+      // 2. ATS & AI Resume/Email Tailoring
+      console.log(chalk.gray(`  • Running ATS Analysis & Tailoring engine...`));
+      const analysis = await generateTailoredApplication(profile, job);
+      console.log(
+        chalk.bold.yellow(`  📊 ATS Match Score: ${analysis.matchScore}/10`) +
+          chalk.gray(` | Top Keywords: ${analysis.matchingKeywords.slice(0, 4).join(', ')}`)
+      );
+
+      // 3. Automated PDF Resume Generation
+      console.log(chalk.gray(`  • Compiling tailored PDF resume via Headless Chrome...`));
+      const pdfPath = await generateResumePdf(profile, analysis, job.companyName);
+      console.log(chalk.green(`  📄 Generated: ${pdfPath}`));
+
+      // 4. Create Lead Record
+      const lead: ProcessedJobLead = {
+        id: randomUUID(),
+        job,
+        analysis,
+        resumePdfPath: pdfPath,
+        status: 'TAILORED',
+        createdAt: new Date().toISOString()
+      };
+
+      // 5. Send or Draft Email
+      const sendResult = await sendOrDraftEmail(lead);
+      if (sendResult.mode === 'SENT') {
+        lead.status = 'SENT';
+        lead.sentAt = new Date().toISOString();
+        console.log(chalk.bold.green(`  🚀 Application sent to ${job.contactEmail}!`));
+      } else {
+        lead.status = 'TAILORED';
+        lead.emailDraftPath = sendResult.draftPath;
+        console.log(chalk.cyan(`  📝 Application drafted to ${sendResult.draftPath}`));
+      }
+
+      // 6. Save to CRM Database & CSV
+      await saveLead(lead);
+      processedLeads.push(lead);
+    } catch (jobErr: any) {
+      console.error(chalk.red(`  ❌ Failed processing job "${job.jobTitle}" at ${job.companyName}: ${jobErr.message}`));
+      const failedLead: ProcessedJobLead = {
+        id: randomUUID(),
+        job,
+        analysis: {
+          matchScore: 0,
+          matchingKeywords: [],
+          missingKeywords: [],
+          recommendedFocus: [],
+          tailoredSummary: '',
+          tailoredSkills: [],
+          tailoredExperiences: [],
+          coldEmailSubject: '',
+          coldEmailBody: '',
+          coverLetter: ''
+        },
+        status: 'FAILED',
+        error: jobErr.message,
+        createdAt: new Date().toISOString()
+      };
+      await saveLead(failedLead).catch(() => {});
     }
-
-    if (!job.contactEmail) {
-      job.contactEmail = `careers@${job.companyDomain || 'company.com'}`;
-      console.log(chalk.yellow(`ℹ Using fallback career contact: ${job.contactEmail}`));
-    }
-
-    // 3. AI Tailoring & ATS Scoring Engine
-    console.log(chalk.cyan(`🤖 [3/5] Tailoring resume & cover letter for ${job.jobTitle}...`));
-    const analysis = await generateTailoredApplication(MASTER_PROFILE, job);
-    console.log(
-      chalk.green(
-        `✓ ATS Match Score: ${chalk.bold(`${analysis.matchScore}/10`)} (Keywords: ${analysis.matchingKeywords.slice(0, 5).join(', ')})`
-      )
-    );
-
-    // 4. Generate ATS-Compliant PDF Resume
-    console.log(chalk.cyan(`📄 [4/5] Compiling tailored PDF resume with Puppeteer...`));
-    const pdfPath = await generateResumePdf(MASTER_PROFILE, analysis, job.companyName);
-    console.log(chalk.green(`✓ Saved PDF: ${pdfPath}`));
-
-    // 5. Draft or Dispatch Email & Record CRM Lead
-    const leadId = `${job.companyName.toLowerCase()}-${Date.now()}-${i}`;
-    const lead: ProcessedJobLead = {
-      id: leadId,
-      job,
-      analysis,
-      resumePdfPath: pdfPath,
-      status: 'DISCOVERED',
-      createdAt: new Date().toISOString()
-    };
-
-    console.log(chalk.cyan(`✉️  [5/5] Processing email outreach...`));
-    const sendResult = await sendOrDraftEmail(lead);
-
-    if (sendResult.mode === 'SENT') {
-      lead.status = 'SENT';
-      lead.sentAt = new Date().toISOString();
-      console.log(chalk.green(`🚀 Live Email successfully sent to ${job.contactEmail}!`));
-    } else {
-      lead.status = 'TAILORED';
-      lead.emailDraftPath = sendResult.draftPath;
-      console.log(chalk.yellow(`📝 [DRY RUN] Drafted email saved to: ${sendResult.draftPath}`));
-    }
-
-    await saveLead(lead);
-    console.log(chalk.green(`💾 Lead recorded in CRM database & CSV export.`));
-
-    processedLeads.push(lead);
   }
 
   return processedLeads;
@@ -94,52 +146,43 @@ export async function processDirectJD(params: {
   contactEmail?: string;
   contactName?: string;
 }): Promise<ProcessedJobLead> {
+  const profile = getActiveProfile();
+
   const job: JobListing = {
-    url: 'manual-entry',
+    url: 'manual-input',
     companyName: params.companyName,
-    companyDomain: params.companyName.toLowerCase().replace(/[^a-z0-9]/g, '') + '.com',
     jobTitle: params.jobTitle,
     descriptionText: params.descriptionText,
     requirements: [],
-    contactEmail: params.contactEmail || `careers@${params.companyName.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`,
-    contactName: params.contactName || 'Hiring Team'
+    contactEmail: params.contactEmail,
+    contactName: params.contactName
   };
 
-  console.log(chalk.blue(`\n💼 Processing Job: ${job.jobTitle} at ${job.companyName}`));
+  console.log(chalk.blue(`\n💼 Processing Manual JD: ${job.jobTitle} at ${job.companyName}`));
 
-  // 1. AI Tailoring & ATS Scoring Engine
-  console.log(chalk.cyan(`🤖 [1/3] Tailoring resume & cover letter...`));
-  const analysis = await generateTailoredApplication(MASTER_PROFILE, job);
-  console.log(
-    chalk.green(
-      `✓ ATS Match Score: ${chalk.bold(`${analysis.matchScore}/10`)} (Keywords: ${analysis.matchingKeywords.slice(0, 5).join(', ')})`
-    )
-  );
+  const analysis = await generateTailoredApplication(profile, job);
+  console.log(chalk.bold.yellow(`📊 ATS Match Score: ${analysis.matchScore}/10`));
 
-  // 2. Generate ATS-Compliant PDF Resume
-  console.log(chalk.cyan(`📄 [2/3] Compiling tailored PDF resume with Puppeteer...`));
-  const pdfPath = await generateResumePdf(MASTER_PROFILE, analysis, job.companyName);
-  console.log(chalk.green(`✓ Saved PDF: ${pdfPath}`));
+  const pdfPath = await generateResumePdf(profile, analysis, job.companyName);
+  console.log(chalk.green(`📄 Generated Tailored Resume: ${pdfPath}`));
 
-  // 3. Draft Outreach & Save Lead
-  const leadId = `${job.companyName.toLowerCase()}-${Date.now()}`;
   const lead: ProcessedJobLead = {
-    id: leadId,
+    id: randomUUID(),
     job,
     analysis,
     resumePdfPath: pdfPath,
-    status: 'DISCOVERED',
+    status: 'TAILORED',
     createdAt: new Date().toISOString()
   };
 
-  console.log(chalk.cyan(`✉️  [3/3] Processing email outreach...`));
   const sendResult = await sendOrDraftEmail(lead);
-  lead.status = 'TAILORED';
-  lead.emailDraftPath = sendResult.draftPath;
-  console.log(chalk.yellow(`📝 [DRY RUN] Drafted email saved to: ${sendResult.draftPath}`));
+  if (sendResult.mode === 'SENT') {
+    lead.status = 'SENT';
+    lead.sentAt = new Date().toISOString();
+  } else {
+    lead.emailDraftPath = sendResult.draftPath;
+  }
 
   await saveLead(lead);
-  console.log(chalk.green(`💾 Lead recorded in CRM database & CSV export.`));
-
   return lead;
 }
