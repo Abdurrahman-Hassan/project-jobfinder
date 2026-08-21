@@ -23,8 +23,12 @@
     "google-hunt": "tsx src/cli.ts google-hunt",
     "test-email": "tsx src/cli.ts test-email",
     "apply": "tsx src/cli.ts apply",
+    "apply:submit": "tsx src/cli.ts apply --submit",
     "ats-hunt": "tsx src/cli.ts ats-hunt",
-    "auto-apply": "tsx src/cli.ts auto-apply"
+    "auto-apply": "tsx src/cli.ts auto-apply",
+    "auto-apply:dry": "tsx src/cli.ts auto-apply --dry-run",
+    "guide": "tsx src/cli.ts guide",
+    "help": "tsx src/cli.ts guide"
   },
   "keywords": [
     "job-automation",

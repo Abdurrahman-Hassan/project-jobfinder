@@ -228,6 +228,8 @@ export async function launchManagedBrowser(
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled',
+      '--ignore-certificate-errors',
+      '--allow-running-insecure-content',
       '--window-size=1366,768'
     ],
     ...options

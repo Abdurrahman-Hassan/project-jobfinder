@@ -8,6 +8,8 @@ import { parseResumeFileToProfile, autoLoadResumeFromFolder } from './importer/r
 import { processJobTarget, processDirectJD } from './pipeline.js';
 import { searchStartupsAndJobs, SEARCH_PRESETS } from './discovery/searchEngine.js';
 import { getStoredLeads, saveLead, getTodaySentCount } from './tracker/db.js';
+import { ensureProfileConfigured } from './config/profile.js';
+import { printHelpGuide } from './commands/helpGuide.js';
 
 dotenv.config();
 
@@ -17,8 +19,21 @@ program
   .name('jobfinder')
   .description('Autonomous AI Job Hunter & Resume Tailoring Engine')
   .version('1.0.0')
-  .hook('preAction', async () => {
-    await autoLoadResumeFromFolder().catch(() => {});
+  .hook('preAction', async (thisCommand, actionCommand) => {
+    // Skip profile autoLoad or validation for guide and import-cv commands
+    const cmdName = actionCommand.name();
+    if (cmdName !== 'guide' && cmdName !== 'import-cv' && cmdName !== 'help') {
+      await autoLoadResumeFromFolder().catch(() => {});
+    }
+  });
+
+// 0. Interactive User Playbook & Help Guide
+program
+  .command('guide')
+  .alias('help-guide')
+  .description('Display interactive user playbook, job search strategy, and command cheatsheet')
+  .action(() => {
+    printHelpGuide();
   });
 
 // 1. Import CV Command (Defaults to resumes/ folder if no path given)
@@ -49,6 +64,7 @@ program
   .description('Scrape a target career page, enrich decision makers, tailor resume, and generate PDF')
   .action(async (url: string) => {
     try {
+      ensureProfileConfigured();
       await processJobTarget(url);
     } catch (err: any) {
       console.error(chalk.red(`Pipeline error: ${err.message}`));
@@ -61,6 +77,7 @@ program
   .description('Reverse-pitch directly to a startup homepage (scrapes product, matches resume strengths, drafts founder pitch)')
   .action(async (startupUrl: string) => {
     try {
+      ensureProfileConfigured();
       const { processStartupPitch } = await import('./pipeline.js');
       await processStartupPitch(startupUrl);
     } catch (err: any) {
@@ -74,6 +91,7 @@ program
   .description('Deep-crawl a company website: inspect career & contact pages, match roles or draft speculative pitch')
   .action(async (companyUrl: string) => {
     try {
+      ensureProfileConfigured();
       const { processCompanyOpportunity } = await import('./pipeline.js');
       await processCompanyOpportunity(companyUrl);
     } catch (err: any) {
@@ -111,6 +129,7 @@ program
   .option('-r, --region <region>', 'Target region (e.g. Remote, US, Europe, Worldwide)')
   .action(async (query: string, options) => {
     try {
+      ensureProfileConfigured();
       const { searchCompanyWebsites } = await import('./discovery/searchEngine.js');
       const { processCompanyOpportunity } = await import('./pipeline.js');
 
@@ -153,6 +172,7 @@ program
   .option('-r, --region <region>', 'Target region (e.g. Remote, US, Europe, Worldwide)')
   .action(async (query: string, options) => {
     try {
+      ensureProfileConfigured();
       const { searchGoogleLive } = await import('./discovery/searchEngine.js');
       const { processCompanyOpportunity } = await import('./pipeline.js');
 
@@ -397,6 +417,7 @@ program
   .description('Send pending drafted leads via Gmail with daily limit and SMTP safety')
   .option('-y, --yes', 'Skip confirmation prompt and send immediately')
   .action(async (options) => {
+    ensureProfileConfigured();
     process.env.DRY_RUN = 'false';
     const leads = await getStoredLeads();
     const pending = leads.filter((l) => l.status === 'TAILORED');
@@ -558,6 +579,7 @@ program
   .option('--no-headless', 'Open visible browser window to watch the auto-fill live')
   .action(async (jobUrl: string, options) => {
     try {
+      ensureProfileConfigured();
       const { autoApplyToAtsPortal } = await import('./automation/atsFormSubmitter.js');
       const result = await autoApplyToAtsPortal(jobUrl, {
         submit: options.submit,
@@ -588,16 +610,17 @@ program
   .option('-s, --submit', 'Submit ATS applications live (use with --auto-apply)')
   .action(async (query: string, options) => {
     try {
-      const { searchGoogleLive } = await import('./discovery/searchEngine.js');
+      ensureProfileConfigured();
+      const { searchAtsPortalsLive } = await import('./discovery/searchEngine.js');
       const { processJobTarget } = await import('./pipeline.js');
       const { autoApplyToAtsPortal } = await import('./automation/atsFormSubmitter.js');
 
       const limit = resolveLimit(options.limit, 10);
       const region = resolveRegion(options.region, 'Worldwide');
 
-      console.log(chalk.bold.magenta(`\n🎯 Searching direct ATS Job Portals (Greenhouse, Lever, Ashby, Workable) for: "${query}" [Region: ${region}] [Limit: ${limit}]...`));
+      console.log(chalk.bold.magenta(`\n🎯 Searching direct ATS Job Portals (Bing -> DuckDuckGo -> Google) for: "${query}" [Region: ${region}] [Limit: ${limit}]...`));
 
-      const targets = await searchGoogleLive(query, limit, region);
+      const targets = await searchAtsPortalsLive(query, limit, region);
       if (targets.length === 0) {
         console.log(chalk.yellow('No matching ATS jobs found.'));
         return;
@@ -638,7 +661,8 @@ program
   .option('--dry-run', 'Fill forms and capture screenshots without clicking final submit')
   .action(async (query: string, options) => {
     try {
-      const { searchGoogleLive } = await import('./discovery/searchEngine.js');
+      ensureProfileConfigured();
+      const { searchAtsPortalsLive } = await import('./discovery/searchEngine.js');
       const { processJobTarget } = await import('./pipeline.js');
       const { autoApplyToAtsPortal } = await import('./automation/atsFormSubmitter.js');
 
@@ -650,9 +674,10 @@ program
       console.log(`  • Query: "${query}"`);
       console.log(`  • Target Region: ${region}`);
       console.log(`  • Limit: ${limit}`);
+      console.log(`  • Search Engine Priority: ${chalk.bold.cyan('Bing -> DuckDuckGo -> Google (Last Resort)')}`);
       console.log(`  • Mode: ${liveSubmit ? chalk.bold.green('LIVE DIRECT SUBMISSION') : chalk.yellow('DRY RUN (Screenshots Only)')}`);
 
-      const targets = await searchGoogleLive(query, limit, region);
+      const targets = await searchAtsPortalsLive(query, limit, region);
       if (targets.length === 0) {
         console.log(chalk.yellow('No matching ATS jobs found.'));
         return;

@@ -1,0 +1,102 @@
+{
+  "name": "Alex Morgan",
+  "title": "Full-Stack Software Engineer & Cloud Architect",
+  "location": "San Francisco, CA (Open to Remote / Relocation)",
+  "phone": "+1 (555) 019-2834",
+  "email": "alex.morgan.dev@example.com",
+  "secondaryEmail": "",
+  "linkedin": "https://linkedin.com/in/alex-morgan-dev",
+  "github": "https://github.com/alex-morgan-dev",
+  "portfolio": "https://alexmorgan.dev",
+  "summary": "Results-driven Software Engineer with 4+ years of professional experience architecting scalable full-stack SaaS platforms, high-performance web applications, and modern cloud microservices. Proficient in Next.js, React, TypeScript, Node.js, NestJS, and cloud infrastructure (AWS, GCP, Docker). Proven track record delivering robust production systems, optimizing API latency, and deploying AI-integrated workflows.",
+  "skillCategories": [
+    {
+      "category": "Languages",
+      "skills": ["TypeScript", "JavaScript (ES6+)", "Python", "SQL", "HTML5", "CSS3", "Go"]
+    },
+    {
+      "category": "Frontend & UI",
+      "skills": [
+        "Next.js (App Router, SSR/SSG/ISR)",
+        "React.js",
+        "Vue.js",
+        "Redux Toolkit",
+        "Tailwind CSS",
+        "Shadcn UI",
+        "Material UI",
+        "Framer Motion"
+      ]
+    },
+    {
+      "category": "Backend & APIs",
+      "skills": [
+        "Node.js",
+        "NestJS",
+        "Express.js",
+        "Fastify",
+        "RESTful APIs",
+        "GraphQL",
+        "Microservices Architecture"
+      ]
+    },
+    {
+      "category": "Databases & Cloud",
+      "skills": [
+        "PostgreSQL",
+        "MongoDB",
+        "Redis",
+        "MySQL",
+        "Docker",
+        "AWS",
+        "Google Cloud Platform (GCP)",
+        "CI/CD Pipelines"
+      ]
+    }
+  ],
+  "experiences": [
+    {
+      "id": "tech-solutions",
+      "company": "Tech Solutions Inc.",
+      "role": "Senior Full-Stack Engineer",
+      "location": "Remote",
+      "period": "Jan 2023 – Present",
+      "keywords": ["Next.js", "React", "TypeScript", "Node.js", "NestJS", "PostgreSQL", "Docker", "AWS"],
+      "bullets": [
+        "Architected high-throughput full-stack web applications using Next.js App Router and NestJS microservices.",
+        "Engineered responsive, accessible design systems with Tailwind CSS and Shadcn UI reducing UI bug reports by 40%.",
+        "Optimized PostgreSQL queries and Redis caching layers to cut p95 response latencies from 450ms to 85ms."
+      ]
+    },
+    {
+      "id": "digital-labs",
+      "company": "Digital Innovation Labs",
+      "role": "Software Engineer",
+      "location": "Remote",
+      "period": "Jun 2021 – Dec 2022",
+      "keywords": ["React", "TypeScript", "Node.js", "Express", "MongoDB", "Docker"],
+      "bullets": [
+        "Developed interactive dashboard applications and real-time state management workflows using React and Redux Toolkit.",
+        "Implemented secure RESTful API integrations and role-based authentication systems (OAuth2, JWT).",
+        "Automated CI/CD deployment pipelines using GitHub Actions and Docker containers."
+      ]
+    }
+  ],
+  "keyProjects": [
+    {
+      "name": "CloudScale SaaS Platform",
+      "tagline": "Multi-Tenant Cloud Analytics & Automated Provisioning Platform",
+      "description": "Multi-tenant cloud management platform with real-time analytics and automated provisioning.",
+      "technologies": ["Next.js", "TypeScript", "Tailwind CSS", "PostgreSQL", "Stripe API"]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Bachelor of Science in Computer Science",
+      "institution": "University of Science & Technology"
+    }
+  ],
+  "certifications": [
+    "AWS Certified Solutions Architect",
+    "Meta Front-End Developer Professional Certificate"
+  ]
+}

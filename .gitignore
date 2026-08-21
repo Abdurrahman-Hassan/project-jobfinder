@@ -1,10 +1,19 @@
-# Environment variables
+# Environment variables & API Keys
 .env
+.env.local
+.env.*.local
 
-# Python cache
+# Candidate Profiles & Resumes (Private)
+src/config/profile.json
+profile.json
+resumes/*.pdf
+
+# Generated Output & Screenshots
+output/
+
+# Logs & Cache
+node_modules/
+dist/
 __pycache__/
 *.py[cod]
-
-node_modules
-
-output
+*.log

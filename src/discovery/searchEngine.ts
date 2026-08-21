@@ -104,6 +104,23 @@ function isLegitimateJobResult(title: string, snippet: string, url: string): boo
     return false;
   }
 
+  // Reject root ATS domains without job/company paths
+  try {
+    const parsed = new URL(url);
+    if (
+      (parsed.hostname.includes('workable.com') ||
+        parsed.hostname.includes('lever.co') ||
+        parsed.hostname.includes('greenhouse.io') ||
+        parsed.hostname.includes('ashbyhq.com') ||
+        parsed.hostname.includes('smartrecruiters.com')) &&
+      (parsed.pathname === '/' || parsed.pathname === '' || parsed.pathname.split('/').filter(Boolean).length === 0)
+    ) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
   const hasTechKeyword =
     text.includes('engineer') ||
     text.includes('developer') ||
@@ -656,6 +673,248 @@ export async function searchDuckDuckGoLive(
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
+    }
+  }
+
+  return results;
+}
+
+// 4. Dedicated Bing ATS Search (Zero CAPTCHA, High-speed indexing)
+export async function searchBingAts(
+  query: string,
+  limit: number = 10,
+  region?: string
+): Promise<SearchResultTarget[]> {
+  const results: SearchResultTarget[] = [];
+  const seenUrls = new Set<string>();
+  const cleanKeyword = query.replace(/["']/g, '').trim();
+  const regionTag = region && region.toLowerCase() !== 'any' ? region : 'remote';
+
+  let browser;
+  try {
+    browser = await launchManagedBrowser();
+    const page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.setUserAgent(getRandomUserAgent());
+
+    const portalQueries = [
+      `${cleanKeyword} ${regionTag} apply.workable.com`,
+      `${cleanKeyword} ${regionTag} boards.greenhouse.io`,
+      `${cleanKeyword} ${regionTag} jobs.lever.co`,
+      `${cleanKeyword} ${regionTag} jobs.ashbyhq.com`
+    ];
+
+    for (const pq of portalQueries) {
+      if (results.length >= limit) break;
+
+      const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(pq)}&ensearch=1&count=20`;
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
+
+      const raw = await page.evaluate(() => {
+        const items: any[] = [];
+        document.querySelectorAll('li.b_algo').forEach((el) => {
+          const a = el.querySelector('h2 a') as HTMLAnchorElement;
+          const snippet = el.querySelector('.b_caption p, .b_algoSlug') as HTMLElement;
+          if (a && a.href) {
+            items.push({
+              title: a.innerText.trim(),
+              url: a.href,
+              snippet: snippet ? snippet.innerText.trim() : ''
+            });
+          }
+        });
+        return items;
+      });
+
+      for (const r of raw) {
+        if (results.length >= limit) break;
+
+        let cleanUrl = r.url;
+        if (cleanUrl.includes('bing.com/ck/a?')) {
+          const match = cleanUrl.match(/[?&]u=([^&]+)/);
+          if (match && match[1]) {
+            const rawBase64 = match[1];
+            const base64Str = rawBase64.startsWith('a1') ? rawBase64.slice(2) : rawBase64;
+            try {
+              cleanUrl = Buffer.from(base64Str, 'base64').toString('utf-8');
+            } catch {}
+          }
+        }
+
+        if (cleanUrl.startsWith('http') && !cleanUrl.includes('bing.com')) {
+          try {
+            const domain = new URL(cleanUrl).hostname.replace(/^www\./, '');
+            if (
+              !IGNORED_DOMAINS.some((d) => domain.includes(d)) &&
+              !seenUrls.has(cleanUrl) &&
+              isLegitimateJobResult(r.title, r.snippet, cleanUrl)
+            ) {
+              seenUrls.add(cleanUrl);
+              results.push({
+                title: r.title,
+                url: cleanUrl,
+                snippet: r.snippet,
+                domain,
+                location: region || 'Remote',
+                source: 'Bing Search (Direct ATS)'
+              });
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Bing ATS Search Warning] ${err.message}`);
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+
+  return results;
+}
+
+// 5. Dedicated DuckDuckGo ATS Search
+export async function searchDuckDuckGoAts(
+  query: string,
+  limit: number = 10,
+  region?: string
+): Promise<SearchResultTarget[]> {
+  const results: SearchResultTarget[] = [];
+  const seenUrls = new Set<string>();
+  const cleanKeyword = query.replace(/["']/g, '').trim();
+  const regionTag = region && region.toLowerCase() !== 'any' ? region : 'remote';
+
+  let browser;
+  try {
+    browser = await launchManagedBrowser();
+    const page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.setUserAgent(getRandomUserAgent());
+
+    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(
+      `${cleanKeyword} ${regionTag} apply.workable.com OR boards.greenhouse.io OR jobs.lever.co OR jobs.ashbyhq.com`
+    )}&ia=web`;
+
+    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 18000 });
+
+    const raw = await page.evaluate(() => {
+      const items: any[] = [];
+      document.querySelectorAll('article, li[data-layout="organic"]').forEach((el) => {
+        const a = el.querySelector('h2 a, a[data-testid="result-title-a"]') as HTMLAnchorElement;
+        const snippet = el.querySelector('[data-result="snippet"]') as HTMLElement;
+        if (a && a.href && !a.href.includes('duckduckgo.com')) {
+          items.push({
+            title: a.innerText.trim(),
+            url: a.href,
+            snippet: snippet ? snippet.innerText.trim() : ''
+          });
+        }
+      });
+      return items;
+    });
+
+    for (const r of raw) {
+      if (results.length >= limit) break;
+      if (r.url.startsWith('http') && !r.url.includes('duckduckgo.com')) {
+        try {
+          const domain = new URL(r.url).hostname.replace(/^www\./, '');
+          if (
+            !IGNORED_DOMAINS.some((d) => domain.includes(d)) &&
+            !seenUrls.has(r.url) &&
+            isLegitimateJobResult(r.title, r.snippet, r.url)
+          ) {
+            seenUrls.add(r.url);
+            results.push({
+              title: r.title,
+              url: r.url,
+              snippet: r.snippet,
+              domain,
+              location: region || 'Remote',
+              source: 'DuckDuckGo (Direct ATS)'
+            });
+          }
+        } catch {}
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[DuckDuckGo ATS Search Warning] ${err.message}`);
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Master ATS Search Engine:
+ * 1. Priority 1: Bing Search (Fast, zero CAPTCHA, direct ATS indexing)
+ * 2. Priority 2: DuckDuckGo Search (Privacy-friendly, fresh remote job listings)
+ * 3. Priority 3: Google Search (Last resort fallback if quota still needed)
+ */
+export async function searchAtsPortalsLive(
+  query: string,
+  limit: number = 10,
+  region?: string
+): Promise<SearchResultTarget[]> {
+  const results: SearchResultTarget[] = [];
+  const seenUrls = new Set<string>();
+
+  console.log(chalk.cyan(`  • [1/3] Searching Bing ATS Engine for: "${query}"...`));
+  try {
+    const bingResults = await searchBingAts(query, limit, region);
+    for (const r of bingResults) {
+      if (results.length >= limit) break;
+      if (!seenUrls.has(r.url)) {
+        seenUrls.add(r.url);
+        results.push(r);
+      }
+    }
+    if (bingResults.length > 0) {
+      console.log(chalk.green(`  ✓ Bing discovered ${bingResults.length} direct ATS openings.`));
+    }
+  } catch (err: any) {
+    console.warn(`[Bing Search Note] ${err.message}`);
+  }
+
+  // If we still need more results, query DuckDuckGo
+  if (results.length < limit) {
+    const remaining = limit - results.length;
+    console.log(chalk.cyan(`  • [2/3] Querying DuckDuckGo ATS Engine (${remaining} remaining)...`));
+    try {
+      const ddgResults = await searchDuckDuckGoAts(query, remaining, region);
+      for (const r of ddgResults) {
+        if (results.length >= limit) break;
+        if (!seenUrls.has(r.url)) {
+          seenUrls.add(r.url);
+          results.push(r);
+        }
+      }
+      if (ddgResults.length > 0) {
+        console.log(chalk.green(`  ✓ DuckDuckGo discovered ${ddgResults.length} direct ATS openings.`));
+      }
+    } catch (err: any) {
+      console.warn(`[DuckDuckGo Search Note] ${err.message}`);
+    }
+  }
+
+  // Only if Bing and DuckDuckGo returned fewer than requested limit, use Google as last resort
+  if (results.length < limit) {
+    const remaining = limit - results.length;
+    console.log(chalk.yellow(`  • [3/3] Google Search (Last Resort Fallback for ${remaining} openings)...`));
+    try {
+      const googleResults = await searchGoogleLive(query, remaining, region);
+      for (const r of googleResults) {
+        if (results.length >= limit) break;
+        if (!seenUrls.has(r.url)) {
+          seenUrls.add(r.url);
+          results.push(r);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[Google Search Note] ${err.message}`);
     }
   }
 
