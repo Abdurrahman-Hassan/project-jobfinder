@@ -474,7 +474,10 @@ program
           await new Promise((resolve) => setTimeout(resolve, delaySec * 1000));
         }
       } else {
-        console.log(chalk.red(`Failed sending to ${lead.job.contactEmail}: ${res.error}`));
+        lead.status = 'FAILED';
+        lead.error = res.error;
+        await saveLead(lead);
+        console.log(chalk.red(`❌ Skipped/Failed sending to ${lead.job.contactEmail}: ${res.error}`));
       }
     }
     console.log(chalk.bold.green('\n🎉 Send queue completed! Check "npm run stats".'));

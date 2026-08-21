@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import { ProcessedJobLead } from '../types/index.js';
 import { isValidEmail, sanitizeHeaderString } from '../validation/schemas.js';
 import { getActiveProfile } from '../config/profile.js';
+import { verifyDomainHasMx } from '../enrichment/emailExtractor.js';
 
 export async function verifySmtpConnection(): Promise<boolean> {
   const gmailUser = process.env.GMAIL_USER || process.env.EMAIL_USER;
@@ -34,11 +35,12 @@ export async function verifySmtpConnection(): Promise<boolean> {
 /**
  * Validates, cleans, and sanitizes recipient email.
  * Replaces dummy/template addresses with verified domain fallback.
+ * Checks DNS MX records to prevent "Address not found" 550 bounces.
  */
-export function sanitizeAndValidateRecipient(
+export async function sanitizeAndValidateRecipient(
   rawEmail?: string,
   domain?: string
-): { valid: boolean; email: string; reason?: string } {
+): Promise<{ valid: boolean; email: string; reason?: string }> {
   const BLOCKED_PREFIXES = [
     'you@',
     'user@',
@@ -78,14 +80,25 @@ export function sanitizeAndValidateRecipient(
 
   if (isBlocked) {
     if (domain && !BLOCKED_DOMAINS.includes(domain)) {
-      candidate = `careers@${domain.replace(/^www\./, '')}`;
+      candidate = `hello@${domain.replace(/^www\./, '')}`;
     } else {
-      return { valid: false, email: candidate, reason: `Blocked or dummy email: "${rawEmail}"` };
+      return { valid: false, email: candidate, reason: `Blocked or placeholder email: "${rawEmail}"` };
     }
   }
 
   if (!isValidEmail(candidate)) {
     return { valid: false, email: candidate, reason: `Invalid email format: "${candidate}"` };
+  }
+
+  // Verify MX mail servers for recipient domain
+  const recipientDomain = candidate.split('@')[1];
+  const hasMx = await verifyDomainHasMx(recipientDomain);
+  if (!hasMx) {
+    return {
+      valid: false,
+      email: candidate,
+      reason: `Domain "${recipientDomain}" has no active MX mail records (would bounce: Address not found)`
+    };
   }
 
   return { valid: true, email: candidate };
@@ -113,8 +126,8 @@ export async function sendOrDraftEmail(lead: ProcessedJobLead): Promise<{
   const gmailUser = process.env.GMAIL_USER || process.env.EMAIL_USER || profile.email;
   const gmailPass = process.env.GMAIL_APP_PASSWORD || process.env.EMAIL_PASS;
 
-  // 1. Recipient Sanitization & Verification
-  const { valid, email: recipient, reason } = sanitizeAndValidateRecipient(
+  // 1. Recipient Sanitization & MX Verification
+  const { valid, email: recipient, reason } = await sanitizeAndValidateRecipient(
     lead.job.contactEmail,
     lead.job.companyDomain
   );

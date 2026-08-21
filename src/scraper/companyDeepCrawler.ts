@@ -356,7 +356,14 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
     );
     targetRecipientEmail = hiringPriority || allEmails[0];
   } else {
-    targetRecipientEmail = `careers@${domain}`;
+    const { verifyDomainHasMx } = await import('../enrichment/emailExtractor.js');
+    const hasMx = await verifyDomainHasMx(domain);
+    if (hasMx) {
+      targetRecipientEmail = `hello@${domain}`;
+    } else {
+      console.log(chalk.gray(`  • [DNS Guard] Domain "${domain}" has no MX mail servers. Skipping unroutable target.`));
+      return null;
+    }
   }
 
   // 4. Intelligent Site Nature Classification
