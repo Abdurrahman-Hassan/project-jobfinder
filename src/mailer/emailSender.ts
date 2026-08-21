@@ -132,16 +132,8 @@ export async function sendOrDraftEmail(lead: ProcessedJobLead): Promise<{
     lead.job.companyDomain
   );
 
-  if (!valid) {
-    return {
-      success: false,
-      mode: 'DRAFTED',
-      error: reason || 'Invalid recipient email'
-    };
-  }
-
   // Update lead with sanitized recipient
-  lead.job.contactEmail = recipient;
+  lead.job.contactEmail = recipient || lead.job.contactEmail;
 
   // 2. Subject and Body Sanitization
   const rawSubject = lead.analysis.coldEmailSubject || `Application for ${lead.job.jobTitle} — ${profile.name}`;
@@ -157,8 +149,12 @@ export async function sendOrDraftEmail(lead: ProcessedJobLead): Promise<{
     const draftFileName = `${sanitizedCompany}_outreach.txt`;
     const draftPath = path.join(draftsDir, draftFileName);
 
+    const deliveryHeader = valid
+      ? `TO: ${recipient} (${lead.job.contactName || 'Hiring Team'})`
+      : `TO: ${recipient || 'UNVERIFIED'} (${lead.job.contactName || 'Hiring Team'}) [REVIEW REQUIRED: ${reason}]`;
+
     const draftContent = `=====================================================
-TO: ${recipient} (${lead.job.contactName || 'Hiring Team'})
+${deliveryHeader}
 ROLE: ${lead.job.jobTitle} at ${lead.job.companyName}
 ATS MATCH SCORE: ${lead.analysis.matchScore}/10
 MATCHED KEYWORDS: ${lead.analysis.matchingKeywords.join(', ')}
@@ -175,12 +171,22 @@ ${lead.analysis.coverLetter}
 
     await fs.writeFile(draftPath, draftContent, 'utf-8');
     lead.emailDraftPath = draftPath;
-    lead.status = 'TAILORED';
+    lead.status = valid ? 'TAILORED' : 'FAILED';
+    if (!valid) lead.error = reason;
 
     return {
-      success: true,
+      success: valid,
       mode: 'DRAFTED',
-      draftPath
+      draftPath,
+      error: valid ? undefined : reason
+    };
+  }
+
+  if (!valid) {
+    return {
+      success: false,
+      mode: 'DRAFTED',
+      error: reason || 'Invalid recipient email'
     };
   }
 

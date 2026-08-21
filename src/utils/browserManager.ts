@@ -183,6 +183,41 @@ export async function getBrowserExecutable(preferredType?: string): Promise<stri
 export async function launchManagedBrowser(
   options: Parameters<typeof puppeteer.launch>[0] & { browserType?: string } = {}
 ): Promise<Browser> {
+  // 1. Cloudflare Browser Rendering (Remote Headless on Edge Network)
+  const cfWsEndpoint =
+    process.env.CLOUDFLARE_BROWSER_WS_ENDPOINT || process.env.BROWSER_WS_ENDPOINT;
+  const cfApiToken = process.env.CLOUDFLARE_API_TOKEN?.trim();
+  const cfAccountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+
+  if (cfWsEndpoint) {
+    try {
+      console.log('  • Connecting to Cloudflare Browser Rendering via WebSocket...');
+      const browser = await puppeteer.connect({ browserWSEndpoint: cfWsEndpoint });
+      activeBrowsers.add(browser);
+      browser.once('disconnected', () => activeBrowsers.delete(browser));
+      return browser;
+    } catch (err: any) {
+      console.warn(`[Cloudflare Browser Warning] Remote connection failed: ${err.message}. Falling back to local stealth browser.`);
+    }
+  } else if (cfApiToken && cfAccountId) {
+    try {
+      console.log('  • Connecting to Cloudflare Edge Browser Rendering...');
+      const endpoint = `wss://api.cloudflare.com/client/v4/accounts/${cfAccountId}/browser-rendering/devtools/browser?keep_alive=600000`;
+      const browser = await puppeteer.connect({
+        browserWSEndpoint: endpoint,
+        headers: {
+          Authorization: `Bearer ${cfApiToken}`
+        }
+      } as any);
+      activeBrowsers.add(browser);
+      browser.once('disconnected', () => activeBrowsers.delete(browser));
+      return browser;
+    } catch (err: any) {
+      console.warn(`[Cloudflare Browser Warning] Cloudflare API connection failed: ${err.message}. Falling back to local stealth browser.`);
+    }
+  }
+
+  // 2. Local Managed Stealth Browser (Brave / Chrome / Edge / Camoufox)
   const executablePath = options.executablePath || (await getBrowserExecutable(options.browserType));
 
   const browser = await puppeteer.launch({

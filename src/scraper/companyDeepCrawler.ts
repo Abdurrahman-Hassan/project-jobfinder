@@ -305,6 +305,26 @@ export async function crawlCompanyWebsiteAndExtractOpportunity(
           }
         }
       });
+
+      // If specific job page URL was found, deep-crawl the exact job description & ATS requirements
+      if (activeRoleFound && matchingRoleUrl && matchingRoleUrl !== primaryCareerUrl) {
+        try {
+          const roleRes = await axios.get(matchingRoleUrl, {
+            headers: { 'User-Agent': getRandomUserAgent() },
+            timeout: 10000,
+            maxContentLength: 5 * 1024 * 1024
+          });
+          const role$ = cheerio.load(roleRes.data);
+          const fullDesc = role$('main, article, div#content, .job-description, .posting-requirements, body').text().trim().slice(0, 3000);
+          if (fullDesc && fullDesc.length > detectedJobDescription.length) {
+            detectedJobDescription = fullDesc;
+          }
+          const roleEmails = extractEmailsFromHtml(roleRes.data);
+          if (roleEmails.length > 0) {
+            careerPageEmails.push(...roleEmails);
+          }
+        } catch {}
+      }
     } catch {
       // ignore
     }

@@ -550,4 +550,145 @@ program
     }
   });
 
+// 10. Automated ATS Portal Form Submitter (Greenhouse, Lever, Ashby, Workable)
+program
+  .command('apply <jobUrl>')
+  .description('Auto-fill and apply directly on Greenhouse, Lever, Ashby, or Workable job forms with tailored PDF resume')
+  .option('-s, --submit', 'Submit application live (default is dry-run review with screenshot)')
+  .option('--no-headless', 'Open visible browser window to watch the auto-fill live')
+  .action(async (jobUrl: string, options) => {
+    try {
+      const { autoApplyToAtsPortal } = await import('./automation/atsFormSubmitter.js');
+      const result = await autoApplyToAtsPortal(jobUrl, {
+        submit: options.submit,
+        headless: options.headless
+      });
+
+      if (result.success) {
+        console.log(chalk.bold.green(`\n✅ Form Auto-Fill Complete [${result.atsType.toUpperCase()}]`));
+        console.log(`  • Status: ${result.submitted ? chalk.bold.green('SUBMITTED') : chalk.yellow('DRAFT / REVIEW ONLY')}`);
+        if (result.screenshotPath) {
+          console.log(`  • Verification Screenshot: ${chalk.blue(result.screenshotPath)}`);
+        }
+      } else {
+        console.log(chalk.red(`\n❌ Auto-Apply Failed: ${result.message}`));
+      }
+    } catch (err: any) {
+      console.error(chalk.red(`Auto-Apply Error: ${err.message}`));
+    }
+  });
+
+// 11. Autonomous ATS Hunt (Greenhouse, Lever, Ashby, Workable Job Discovery & Auto-Apply)
+program
+  .command('ats-hunt <query>')
+  .description('Autonomous discovery of live Greenhouse, Lever, Ashby, and Workable job openings with optional auto-apply')
+  .option('-l, --limit <number>', 'Number of jobs to discover')
+  .option('-r, --region <region>', 'Target region (e.g. Remote, US, Europe, Worldwide)')
+  .option('-a, --auto-apply', 'Automatically auto-fill ATS application forms and capture screenshots')
+  .option('-s, --submit', 'Submit ATS applications live (use with --auto-apply)')
+  .action(async (query: string, options) => {
+    try {
+      const { searchGoogleLive } = await import('./discovery/searchEngine.js');
+      const { processJobTarget } = await import('./pipeline.js');
+      const { autoApplyToAtsPortal } = await import('./automation/atsFormSubmitter.js');
+
+      const limit = resolveLimit(options.limit, 10);
+      const region = resolveRegion(options.region, 'Worldwide');
+
+      console.log(chalk.bold.magenta(`\n🎯 Searching direct ATS Job Portals (Greenhouse, Lever, Ashby, Workable) for: "${query}" [Region: ${region}] [Limit: ${limit}]...`));
+
+      const targets = await searchGoogleLive(query, limit, region);
+      if (targets.length === 0) {
+        console.log(chalk.yellow('No matching ATS jobs found.'));
+        return;
+      }
+
+      console.log(chalk.green(`\nFound ${targets.length} direct ATS job openings:`));
+      targets.forEach((t, i) => console.log(`  ${i + 1}. ${chalk.bold(t.title)} (${chalk.blue(t.url)})`));
+
+      console.log(chalk.bold.green(`\n🚀 Deep-scraping job descriptions and tailoring ATS resumes...`));
+      let processed = 0;
+      for (const t of targets) {
+        try {
+          console.log(chalk.cyan(`\n[${processed + 1}/${targets.length}] Processing: ${t.title} (${t.url})`));
+          const leads = await processJobTarget(t.url);
+
+          if (options.autoApply && leads && leads.length > 0) {
+            console.log(chalk.yellow(`  ⚡ Auto-filling ATS form for: ${t.url}...`));
+            await autoApplyToAtsPortal(t.url, { lead: leads[0], submit: options.submit });
+          }
+          if (leads && leads.length > 0) processed++;
+        } catch (err: any) {
+          console.error(chalk.red(`Failed processing ${t.url}: ${err.message}`));
+        }
+      }
+
+      console.log(chalk.bold.cyan(`\n✨ ATS hunt complete: ${processed} applications tailored and prepared in output/!`));
+    } catch (err: any) {
+      console.error(chalk.red(`ATS hunt error: ${err.message}`));
+    }
+  });
+
+// 12. Full Autonomous ATS Auto-Apply (Discover -> Tailor -> Live Submit)
+program
+  .command('auto-apply <query>')
+  .description('100% Autonomous: Discover ATS jobs, tailor custom PDF resumes, and submit applications live')
+  .option('-l, --limit <number>', 'Number of applications to submit')
+  .option('-r, --region <region>', 'Target region (e.g. Remote, US, Europe, Worldwide)')
+  .option('--dry-run', 'Fill forms and capture screenshots without clicking final submit')
+  .action(async (query: string, options) => {
+    try {
+      const { searchGoogleLive } = await import('./discovery/searchEngine.js');
+      const { processJobTarget } = await import('./pipeline.js');
+      const { autoApplyToAtsPortal } = await import('./automation/atsFormSubmitter.js');
+
+      const limit = resolveLimit(options.limit, 10);
+      const region = resolveRegion(options.region, 'Worldwide');
+      const liveSubmit = !options.dryRun;
+
+      console.log(chalk.bold.magenta(`\n⚡ 100% Autonomous ATS Auto-Apply Pipeline Started!`));
+      console.log(`  • Query: "${query}"`);
+      console.log(`  • Target Region: ${region}`);
+      console.log(`  • Limit: ${limit}`);
+      console.log(`  • Mode: ${liveSubmit ? chalk.bold.green('LIVE DIRECT SUBMISSION') : chalk.yellow('DRY RUN (Screenshots Only)')}`);
+
+      const targets = await searchGoogleLive(query, limit, region);
+      if (targets.length === 0) {
+        console.log(chalk.yellow('No matching ATS jobs found.'));
+        return;
+      }
+
+      console.log(chalk.green(`\nFound ${targets.length} live ATS job openings:`));
+      targets.forEach((t, i) => console.log(`  ${i + 1}. ${chalk.bold(t.title)} (${chalk.blue(t.url)})`));
+
+      let submittedCount = 0;
+      for (const t of targets) {
+        try {
+          console.log(chalk.cyan(`\n[${submittedCount + 1}/${targets.length}] Processing: ${t.title} (${t.url})`));
+          const leads = await processJobTarget(t.url);
+
+          if (leads && leads.length > 0) {
+            console.log(chalk.yellow(`  ⚡ Auto-filling & submitting ATS form for: ${t.url}...`));
+            const applyResult = await autoApplyToAtsPortal(t.url, {
+              lead: leads[0],
+              submit: liveSubmit
+            });
+            if (applyResult.success) {
+              submittedCount++;
+            }
+          }
+        } catch (err: any) {
+          console.error(chalk.red(`Failed processing ${t.url}: ${err.message}`));
+        }
+      }
+
+      console.log(chalk.bold.green(`\n🎉 Autonomous ATS Submission Run Complete!`));
+      console.log(`  • Total Applications Processed: ${submittedCount}`);
+      console.log(`  • Resumes: output/resumes/`);
+      console.log(`  • Verification Screenshots: output/screenshots/`);
+    } catch (err: any) {
+      console.error(chalk.red(`Auto-Apply Error: ${err.message}`));
+    }
+  });
+
 program.parse(process.argv);

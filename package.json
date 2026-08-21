@@ -21,7 +21,10 @@
     "crawl": "tsx src/cli.ts crawl",
     "company-hunt": "tsx src/cli.ts company-hunt",
     "google-hunt": "tsx src/cli.ts google-hunt",
-    "test-email": "tsx src/cli.ts test-email"
+    "test-email": "tsx src/cli.ts test-email",
+    "apply": "tsx src/cli.ts apply",
+    "ats-hunt": "tsx src/cli.ts ats-hunt",
+    "auto-apply": "tsx src/cli.ts auto-apply"
   },
   "keywords": [
     "job-automation",

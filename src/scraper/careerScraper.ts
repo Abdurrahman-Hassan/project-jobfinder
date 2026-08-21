@@ -1,5 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import chalk from 'chalk';
 import { JobListing } from '../types/index.js';
 import { extractEmailsFromHtml } from '../enrichment/emailExtractor.js';
 import { findCareerPagesFromSitemap } from './sitemapParser.js';
@@ -88,17 +89,18 @@ function resolveCompanyFromAts(
     // 4. Workable: apply.workable.com/{company}/j/... or jobs.workable.com/view/.../at-{company}
     if (host.includes('workable.com')) {
       if (host.includes('apply.workable.com')) {
-        const slug = pathname.split('/')[1];
-        if (slug && slug.length > 1) {
+        const parts = pathname.split('/').filter(Boolean);
+        const slug = parts[0];
+        if (slug && slug.length > 1 && !['j', 'view', 'jobs', 'careers'].includes(slug.toLowerCase())) {
           const name = slug.charAt(0).toUpperCase() + slug.slice(1);
-          return { companyName: name, companyDomain: `${slug}.com` };
+          return { companyName: name, companyDomain: `${slug.toLowerCase().replace(/[^a-z0-9]/g, '')}.com` };
         }
       }
       const atMatch = pathname.match(/at-([a-zA-Z0-9_-]+)/i);
       if (atMatch && atMatch[1]) {
         const slug = atMatch[1];
         const name = slug.charAt(0).toUpperCase() + slug.slice(1);
-        return { companyName: name, companyDomain: `${slug}.com` };
+        return { companyName: name, companyDomain: `${slug.toLowerCase().replace(/[^a-z0-9]/g, '')}.com` };
       }
     }
 
@@ -364,6 +366,15 @@ export async function scrapeJobOrCareerPage(targetUrl: string): Promise<JobListi
         'remoteok.com',
         'github.com'
       ];
+
+      const isJobExpired =
+        /not available anymore|no longer accepting|position has been filled|job is closed|this job has expired/i.test(smartTitle) ||
+        /not available anymore|no longer accepting|position has been filled|job is closed|this job has expired/i.test(cleanDescription.slice(0, 500));
+
+      if (isJobExpired) {
+        console.log(chalk.gray(`  • [Expired Job Filter] "${smartTitle}" at ${smartCompanyName} is closed. Skipping.`));
+        return [];
+      }
 
       let cleanedContactEmail = primaryContactEmail;
       if (

@@ -265,8 +265,8 @@ export async function searchGoogleLive(
   const cleanKeyword = query.replace(/["']/g, '').trim();
   const regionClause = buildRegionFilterString(region);
   const googleSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(
-    `site:ashbyhq.com OR site:lever.co OR site:greenhouse.io OR site:workable.com "${cleanKeyword}" ${regionClause} -staffing -recruiting -recruitment -agency -"our client"`
-  )}&hl=en&num=${Math.max(30, limit * 4)}`;
+    `site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com OR site:apply.workable.com OR site:jobs.smartrecruiters.com ${cleanKeyword} ${regionClause} -staffing -recruiting -recruitment`
+  )}&hl=en&num=${Math.max(50, limit * 3)}`;
 
   let headlessBrowser: Browser | null = null;
   let isCaptchaDetected = false;
@@ -344,7 +344,7 @@ export async function searchGoogleLive(
         }
       }
 
-      if (results.length > 0) {
+      if (results.length >= limit) {
         return results;
       }
     }
@@ -480,6 +480,18 @@ export async function searchGoogleLive(
         await visibleBrowser.close().catch(() => {});
       }
     }
+  }
+
+  if (results.length < limit) {
+    try {
+      const backup = await searchDuckDuckGoLive(query, limit - results.length, region);
+      for (const b of backup) {
+        if (!seenUrls.has(b.url)) {
+          seenUrls.add(b.url);
+          results.push(b);
+        }
+      }
+    } catch {}
   }
 
   return results;
